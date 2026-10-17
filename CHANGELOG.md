@@ -2,6 +2,15 @@
 
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
+## [Chưa phát hành]
+
+### Sửa — Giao diện tối cho toàn bộ trang web (đồng bộ caheoai.com)
+
+- Mọi trang của bảng điều khiển (trang đăng nhập, thanh bên, thẻ, bảng, biểu đồ, hộp thoại, Nhật ký, Phân quyền Bot, Thư mục, Tri thức, Thương hiệu…) chuyển sang nền tối trung tính. Chỉ sửa tệp `dashboard/public/style.css`; không đổi hành vi, dữ liệu, đường dẫn hay quyền.
+- **Màu thương hiệu vẫn do khách chọn** và vẫn áp dụng như cũ. Chữ màu thương hiệu trên nền tối được trộn sáng với trắng để đủ tương phản; các ô biểu tượng giữ nguyên màu.
+- Khung xem trước ở trang Thương hiệu giờ đổi màu **theo màu đang chọn**, không phải màu đã lưu.
+- Ô vuông QR và các ô màu thư mục giữ nguyên độ sáng để còn quét được và còn thấy dấu ✓.
+
 ## [2.49.0] — 2026-10-16
 
 ### Thêm — Xếp thư mục ngay trong Phiên chat
