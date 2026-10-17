@@ -184,7 +184,7 @@ const QUICK = [
 ];
 
 const USE_PERIODS = [[1, 'Hôm nay'], [7, '7 ngày'], [30, '30 ngày']];
-/** Khách dùng bot: lượt người không phải chủ nhân được bot xử lý trong nhóm / nhắn riêng + xếp hạng. */
+/** Người dùng bot: lượt được bot xử lý trong nhóm / nhắn riêng + xếp hạng (tính cả chủ nhân). */
 function BotUses() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState(null);
@@ -205,7 +205,7 @@ function BotUses() {
         <span class="conv-count" title=${`${p.count} lượt`}>${p.count.toLocaleString('vi-VN')}</span>
       </button></li>`)}</ol>` : html`<p class="muted small">Chưa có ai.</p>`}
   </div>`;
-  return html`<${Card} title="Khách dùng bot" icon="users" tint="teal" extra="ov-uses-card">
+  return html`<${Card} title="Người dùng bot" icon="users" tint="teal" extra="ov-uses-card">
     <div class="chips" role="group" aria-label="Khoảng thời gian">${USE_PERIODS.map(([d, label]) => html`<button key=${d} type="button"
       class="btn btn-secondary btn-sm chip" aria-pressed=${days === d ? 'true' : 'false'} onClick=${() => setDays(d)}>${label}</button>`)}</div>
     ${error ? html`<p class="muted small">${error}</p>` : !data || data.days !== days ? html`<${Spinner} />` : html`
@@ -214,7 +214,7 @@ function BotUses() {
         <div><dt>Lượt nhắn riêng</dt><dd>${data.dm.uses.toLocaleString('vi-VN')}</dd><dd class="ov-small muted">${data.dm.people} người</dd></div>
       </dl>
       <div class="ov-boards">${board('Dùng nhiều nhất trong nhóm', data.group, true)}${board('Nhắn riêng nhiều nhất', data.dm, false)}</div>
-      <p class="muted small">Chỉ tính lượt bot thực sự nhận xử lý (được tag, nhóm đang bật, được phép nhắn riêng); không tính chủ nhân.${data.approx ? ' Số trước ngày cập nhật được dựng lại từ lịch sử trợ lý nên có thể lệch vài lượt trong nhóm.' : ''}</p>`}
+      <p class="muted small">Chỉ tính lượt bot thực sự nhận xử lý (được tag, nhóm đang bật, được phép nhắn riêng); tính cả chủ nhân.${data.approx ? ' Số trước ngày cập nhật được dựng lại từ lịch sử trợ lý nên có thể lệch vài lượt trong nhóm.' : ''}</p>`}
   <//>`;
 }
 

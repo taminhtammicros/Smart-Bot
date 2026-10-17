@@ -58,15 +58,17 @@ export function makeRestartSidecar({
   const freePort = () => freeListenerPort({ port, execImpl, ownPid, sleepImpl });
 
   return async () => {
-    // Linux mặc định: chờ systemctl xong và xét mã thoát. Các cách chạy tách rời giữ kiểu "spawn là xong".
-    if (!cmd && platform !== 'win32') {
+    // Chỉ Linux mới có systemctl để khởi động lại dịch vụ (chờ tới khi xong và xét mã thoát).
+    // Windows/macOS không có systemctl: tự chạy lại tiến trình theo kiểu "spawn là xong".
+    if (!cmd && platform === 'linux') {
       await systemctlRestart({ service: 'zalo-bridge', envVar: 'ZALO_SIDECAR_RESTART_CMD', execImpl });
       return;
     }
     let child;
     if (cmd) child = spawnImpl(cmd, { ...opts, shell: true, env: childEnv() });
     else {
-      await freePort().catch((e) => console.warn('[restart] không giải phóng được cổng:', e.message));
+      // netstat/taskkill chỉ có trên Windows. macOS thì tiến trình đã chết nên cổng đã nhả — spawn thẳng.
+      if (platform === 'win32') await freePort().catch((e) => console.warn('[restart] không giải phóng được cổng:', e.message));
       child = spawnImpl(process.execPath, ['server.js'], { ...opts, cwd: sidecarRoot, env: childEnv() });
     }
     await waitSpawned(child);

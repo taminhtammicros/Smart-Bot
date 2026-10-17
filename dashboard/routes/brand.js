@@ -25,7 +25,7 @@ export function brandRoutes({ brand, activity }) {
   r.put('/api/brand', requireAuth, (req, res) => {
     try {
       const b = brand.set(req.body);
-      log(req, 'brand_update', `${b.name} (${b.subtitle}) · ${b.color}${b.poweredBy ? '' : ' · ẩn "Vận hành bởi 2Anh AI"'}`);
+      log(req, 'brand_update', `${b.name} (${b.subtitle}) · ${b.color}${b.poweredBy ? '' : ' · ẩn "Vận Hành bởi Cá Heo AI"'}`);
       res.json({ ok: true, ...b, suggestions: SUGGESTIONS });
     } catch (err) { fail(res, err); }
   });

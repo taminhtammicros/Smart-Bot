@@ -38,20 +38,21 @@ export function statusRoutes({ sidecar, linker, store, threadNames, health = nul
       res.status(500).json({ ok: false, error: 'Chưa đọc được số liệu sử dụng AI.' });
     }
   });
-  // Khách dùng bot (Tổng quan): lượt trong nhóm / nhắn riêng + xếp hạng; đệm 60 giây theo khoảng ngày.
+  // Người dùng bot (Tổng quan): lượt trong nhóm / nhắn riêng + xếp hạng; đệm 15 giây theo khoảng ngày để lần tải lại sau
+  // lượt mới vẫn thấy số đúng, không phải chờ lâu.
   const usesCache = new Map();
   r.get('/bot-uses', requireAuth, (req, res) => {
-    if (!botUses) return res.status(404).json({ ok: false, error: 'Chưa có số liệu khách dùng bot.' });
+    if (!botUses) return res.status(404).json({ ok: false, error: 'Chưa có số liệu người dùng bot.' });
     try {
       const days = Number(req.query.days) || 7;
       const hit = usesCache.get(days);
-      if (hit && now() - hit.at < 60_000) return res.json({ ok: true, ...hit.value });
+      if (hit && now() - hit.at < 15_000) return res.json({ ok: true, ...hit.value });
       const value = botUses.stats(days);
       usesCache.set(days, { at: now(), value });
       res.json({ ok: true, ...value });
     } catch (err) {
       console.error('[dashboard] đọc lượt dùng bot lỗi:', err);
-      res.status(500).json({ ok: false, error: 'Chưa đọc được số liệu khách dùng bot.' });
+      res.status(500).json({ ok: false, error: 'Chưa đọc được số liệu người dùng bot.' });
     }
   });
   r.get('/status', requireAuth, async (req, res) => {

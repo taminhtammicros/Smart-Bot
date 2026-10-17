@@ -43,6 +43,25 @@ test('có cmd: chạy qua shell, ẩn cửa sổ, không đụng netstat', async
   assert.equal(f.execCalls.length, 0);
 });
 
+test('macOS không cmd: spawn thẳng server.js, không gọi systemctl/netstat', async () => {
+  const f = fakes();
+  await makeRestartSidecar({ platform: 'darwin', sidecarRoot: '/x', spawnImpl: f.spawnImpl, execImpl: f.execImpl, sleepImpl: f.sleepImpl })();
+  assert.equal(f.execCalls.length, 0);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0][0], process.execPath);
+  assert.deepEqual(f.calls[0][1], ['server.js']);
+  assert.equal(f.calls[0][2].cwd, '/x');
+  assert.equal(f.calls[0].unrefd, true);
+});
+
+test('có cmd: không đụng systemctl trên macOS', async () => {
+  const f = fakes();
+  await makeRestartSidecar({ cmd: 'start-it', platform: 'darwin', sidecarRoot: '/x', spawnImpl: f.spawnImpl, execImpl: f.execImpl, sleepImpl: f.sleepImpl })();
+  assert.equal(f.execCalls.length, 0);
+  assert.equal(f.calls[0][0], 'start-it');
+  assert.equal(f.calls[0][1].shell, true);
+});
+
 test('Windows: giết đúng tiến trình đang LISTEN cổng rồi mới spawn', async () => {
   const f = fakes({ netstat: HEAD + LINE(3872, 4321) + LINE(5000, 999) });
   await makeRestartSidecar({ platform: 'win32', sidecarRoot: 'C:/x', spawnImpl: f.spawnImpl, execImpl: f.execImpl, sleepImpl: f.sleepImpl, ownPid: 1 })();

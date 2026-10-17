@@ -515,7 +515,7 @@ Bảng nằm ở `<HERMES_HOME>/zalo/permissions.json` (bản trước ở `perm
 
 ### Thương hiệu
 
-Mục **Thương hiệu** (Quản trị và Chủ bot đều dùng được) đổi logo, tên và màu của dashboard. Logo nhận ảnh PNG, JPG hoặc WebP (không nhận SVG); trình duyệt tự thu về tối đa 256×256 điểm ảnh — nên dùng ảnh vuông, nền trong suốt. Màu chọn một trong 6 gợi ý hoặc nhập mã (vd. `#1d4ed8`); màu quá nhạt để chữ trắng đọc được (dưới 4,5 : 1) thì không lưu được. Khung **Xem trước** cho thấy thanh bên và trang đăng nhập trước khi bấm Lưu. Có thể ẩn dòng "Vận hành bởi 2Anh AI". **Khôi phục mặc định** đưa tên, màu, logo về như lúc cài.
+Mục **Thương hiệu** (Quản trị và Chủ bot đều dùng được) đổi logo, tên và màu của dashboard. Logo nhận ảnh PNG, JPG hoặc WebP (không nhận SVG); trình duyệt tự thu về tối đa 256×256 điểm ảnh — nên dùng ảnh vuông, nền trong suốt. Màu chọn một trong 6 gợi ý hoặc nhập mã (vd. `#1d4ed8`); màu quá nhạt để chữ trắng đọc được (dưới 4,5 : 1) thì không lưu được. Khung **Xem trước** cho thấy thanh bên và trang đăng nhập trước khi bấm Lưu. Có thể ẩn dòng "Vận Hành bởi Cá Heo AI". **Khôi phục mặc định** đưa tên, màu, logo về như lúc cài.
 
 Trang đăng nhập hiện tên, màu và logo này cả khi chưa đăng nhập. Dữ liệu nằm ở `<HERMES_HOME>/zalo/dashboard/brand.json` và `brand/logo.png`.
 
@@ -586,7 +586,7 @@ Cần đặt trong `.env` của Hermes: `ZALO_STUDIO_DIR` (thư mục 2Anh Studi
 
 - [ ] Thương hiệu: đổi tên + chọn màu gợi ý + tải logo JPG, Lưu → thanh bên, tab trình duyệt đổi ngay; đăng xuất → trang đăng nhập đúng tên, màu, logo.
 - [ ] Nhập mã màu nhạt (vd. `#fde68a`) → báo khó đọc, không lưu được. Chọn tệp `.svg` → báo không nhận SVG.
-- [ ] Tắt "Vận hành bởi 2Anh AI" → dòng đó biến mất ở thanh bên và trang đăng nhập. Khôi phục mặc định → về như lúc cài.
+- [ ] Tắt "Vận Hành bởi Cá Heo AI" → dòng đó biến mất ở thanh bên và trang đăng nhập. Khôi phục mặc định → về như lúc cài.
 - [ ] Chủ nhân bot: thêm UID một người thứ hai → dải vàng; bấm Khởi động lại trợ lý → khoảng một phút sau người đó dùng được công cụ chủ nhân; dải vàng biến mất.
 - [ ] Còn một chủ nhân thì không bỏ được; nhập số điện thoại → báo lỗi.
 - [ ] Người dùng: cột "Đăng nhập gần nhất" đúng giờ vừa đăng nhập.

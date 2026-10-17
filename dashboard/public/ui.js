@@ -99,7 +99,7 @@ export function BrandMark({ brand, size = 20 }) {
 }
 
 export function PoweredBy({ brand }) {
-  return brand?.poweredBy ? html`<p class="powered">Vận hành bởi 2Anh AI</p>` : null;
+  return brand?.poweredBy ? html`<p class="powered">Vận Hành bởi Cá Heo AI</p>` : null;
 }
 
 /**

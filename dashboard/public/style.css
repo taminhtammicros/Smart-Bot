@@ -930,7 +930,7 @@ button.flow-node:hover { border-color: var(--brand); }
 .donate-pill:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
 .strip .dialog { font-weight: 400; font-size: 15px; }
 @media (prefers-reduced-motion: reduce) { .donate-pill { transition: none; } .donate-pill:hover { transform: none; } }
-/* Cộng đồng 2Anh: viên thuốc xanh Zalo cạnh nút Ủng hộ, mở nhóm Zalo trong tab mới. */
+/* Cá Heo AI BOT FORUM: viên thuốc xanh Zalo cạnh nút Ủng hộ, mở nhóm Zalo trong tab mới. */
 .community-pill {
   display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 14px; border-radius: 999px;
   background: #0068ff; color: #fff; font-size: 14px; font-weight: 700; text-decoration: none;
@@ -1305,7 +1305,7 @@ a.metric:hover { color: inherit; background: #eeeef1; }
   .settings-form > .mem-block { min-width: 0; margin: 0; }
   .settings-form > :not(.mem-block) { grid-column: 1 / -1; }
 }
-/* PC rộng: Hội thoại · (Lịch hẹn, AI, Lối tắt) · Khách dùng bot thành 3 cột. */
+/* PC rộng: Hội thoại · (Lịch hẹn, AI, Lối tắt) · Người dùng bot thành 3 cột. */
 @media (min-width: 1500px) {
   .ov-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1.15fr); }
   .ov-grid > .ov-uses-card { grid-column: auto; }
@@ -1364,7 +1364,7 @@ a.metric:hover { color: inherit; background: #eeeef1; }
 .pick-mark { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-right: 8px; border: 1.5px solid var(--border); border-radius: 4px; font-size: 13px; line-height: 1; vertical-align: -3px; }
 .person-card[aria-pressed="true"] .pick-mark { background: var(--brand); border-color: var(--brand); color: #fff; }
 
-/* Tổng quan › Khách dùng bot. */
+/* Tổng quan › Người dùng bot. */
 .ov-uses { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ov-boards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
 .ov-board h3 { margin: 0 0 6px; font-size: 14px; }

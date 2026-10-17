@@ -1,7 +1,7 @@
 """Sổ lượt dùng bot: mỗi lượt bot thực sự nhận xử lý (đã qua mọi bộ lọc: được tag, nhóm bật, được nhắn riêng…) ghi một
 dòng JSON vào ``<HERMES_HOME>/zalo/bot-uses.jsonl`` — ``{"t": ms, "uid", "name", "thread", "group": bool, "owner": bool}``.
 
-Dashboard (Tổng quan › Khách dùng bot) đếm lượt trong nhóm / nhắn riêng và xếp hạng người dùng nhiều nhất. Giữ 40 ngày:
+Dashboard (Tổng quan › Người dùng bot) đếm lượt trong nhóm / nhắn riêng và xếp hạng người dùng nhiều nhất. Giữ 40 ngày:
 mỗi ngày dọn một lần. Cố hết sức — ghi lỗi thì bỏ qua, không bao giờ làm hỏng lượt trả lời.
 """
 

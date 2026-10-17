@@ -1,4 +1,4 @@
-// Thương hiệu (spec §5.1, §9, §11.8): tên, màu, logo, dòng "Vận hành bởi 2Anh AI".
+// Thương hiệu (spec §5.1, §9, §11.8): tên, màu, logo, dòng "Vận Hành bởi Cá Heo AI".
 // Logo chỉ nhận PNG ≤ 256 px đã được trình duyệt thu nhỏ; máy chủ kiểm byte, không giải mã ảnh.
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { DEFAULT_COLOR, MIN_CONTRAST, brandVars, contrastWithWhite, normalizeHex } from '../public/brand-color.js';
@@ -28,7 +28,7 @@ export function parseBrand(body) {
   if (contrastWithWhite(color) < MIN_CONTRAST) {
     throw new InvalidBrand('Màu này quá nhạt, chữ trắng trên nút sẽ khó đọc — chọn màu đậm hơn.');
   }
-  if (typeof b.poweredBy !== 'boolean') throw new InvalidBrand('Lựa chọn "Vận hành bởi 2Anh AI" không hợp lệ — tải lại trang rồi thử lại.');
+  if (typeof b.poweredBy !== 'boolean') throw new InvalidBrand('Lựa chọn "Vận Hành bởi Cá Heo AI" không hợp lệ — tải lại trang rồi thử lại.');
   // Dòng phụ dưới tên (giai đoạn 7): bản giao diện cũ không gửi → giữ mặc định.
   if (b.subtitle !== undefined && typeof b.subtitle !== 'string') throw new InvalidBrand('Dòng phụ không hợp lệ — nhập lại.');
   // eslint-disable-next-line no-control-regex

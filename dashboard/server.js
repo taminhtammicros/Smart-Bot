@@ -91,7 +91,6 @@ export function buildDeps({ env = process.env, sidecarRoot = join(here, '..'), i
     store,
     botUses: createBotUses({
       hermesHome: paths.hermesHome, stateDb: paths.hermesStateDb, zaloDb: paths.sqliteFile,
-      owners: () => [...owners.list(), ...owners.overrideUids()],
       groupName: (id) => threadNames.cached().get(id) || '',
       personName: (uid) => { try { return (uid && (store.senderNames([uid]).get(uid) || people.list().find((p) => p.uid === uid)?.name)) || ''; } catch { return ''; } },
       // Chưa đọc được lịch sử tin nhắn thì không lọc (tránh bảng trống).

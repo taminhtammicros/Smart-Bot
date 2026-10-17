@@ -1,13 +1,15 @@
 /**
- * Khách dùng bot (Tổng quan): đếm lượt người KHÔNG phải chủ nhân được bot nhận xử lý — trong nhóm và khi nhắn riêng —
- * và xếp hạng người dùng nhiều nhất.
+ * Người dùng bot (Tổng quan): đếm lượt bot nhận xử lý — trong nhóm và khi nhắn riêng — và xếp hạng người dùng
+ * nhiều nhất. Tính cả chủ nhân (không loại ZALO_ALLOWED_USERS).
  *
  * Nguồn chính: `<HERMES_HOME>/zalo/bot-uses.jsonl` do plugin ghi mỗi lượt (hermes-plugin/zalo/bot_uses.py).
- * Trước khi có sổ đó: dựng lại một lần (30 ngày) từ state.db của Hermes, lưu `bot-uses-backfill.json`:
+ * Trước khi có sổ đó: dựng lại (30 ngày) từ state.db của Hermes, lưu `bot-uses-backfill.json`:
  *  - nhắn riêng: mỗi tin người dùng của phiên `chat_type='dm'` là một lượt của người có UID = chat_id (chính xác);
- *  - trong nhóm: tin người dùng ghi "[Tên] …" → ghép tên với tin cùng nhóm, cùng lúc (±3 phút) trong lịch sử tin của
- *    kết nối Zalo để lấy UID; không ghép được thì giữ tên, UID rỗng (gần đúng — `approx`).
- * Chỉ dùng phần dựng lại cho khoảng thời gian TRƯỚC dòng đầu tiên của sổ thật, không đếm trùng.
+ *  - trong nhóm: người gửi lấy từ phiên (sessions.user_id + origin_json.user_name); bản Hermes cũ ghi "[Tên] …" thì
+ *    ghép tên với tin cùng nhóm, cùng lúc (±3 phút) trong lịch sử tin của kết nối Zalo để lấy UID; không ghép được thì
+ *    giữ tên, UID rỗng (gần đúng — `approx`).
+ * Chưa có sổ thật thì bản dựng lại là nguồn duy nhất, được dựng lại mỗi lần đọc cho kịp lượt mới; có sổ thật rồi thì chỉ
+ * dùng phần dựng lại cho khoảng thời gian TRƯỚC dòng đầu tiên của sổ thật, không đếm trùng.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +44,7 @@ export function buildBackfill({ stateDb, zaloDb, now }) {
   const db = new DatabaseSync(stateDb, { readOnly: true, timeout: 2000 });
   let turns = [];
   try {
-    turns = db.prepare(`SELECT s.chat_type AS type, s.chat_id AS chat, m.content AS content, m.timestamp AS ts
+    turns = db.prepare(`SELECT s.chat_type AS type, s.chat_id AS chat, s.user_id AS uid, s.origin_json AS origin, m.content AS content, m.timestamp AS ts
       FROM messages m JOIN sessions s ON s.id = m.session_id
       WHERE s.source = 'zalo' AND m.role = 'user' AND m.timestamp >= ? ORDER BY m.timestamp`).all(since);
   } finally { db.close(); }
@@ -69,21 +71,29 @@ export function buildBackfill({ stateDb, zaloDb, now }) {
       if (!chat) continue;
       if (r.type === 'dm') { rows.push({ t, uid: chat, name: '', thread: chat, group: false }); continue; }
       if (r.type !== 'group') continue;
-      const who = questionOf(r.content).who;
-      let uid = '';
-      if (near) {
+      const rawWho = questionOf(r.content).who;
+      // Bản Hermes mới KHÔNG gắn tiền tố "[Tên]" vào nội dung — người gửi nằm ở phiên
+      // (sessions.user_id + origin_json.user_name). Chỉ dùng `who` cho dữ liệu cũ có tiền tố,
+      // và bỏ qua tiêu đề ngữ cảnh "[Ngữ cảnh gần nhất trong nhóm Zalo]" bị nhận nhầm là tên.
+      const who = /^Ngữ cảnh gần nhất/.test(rawWho) ? '' : rawWho;
+      const senderUid = String(r.uid || '');
+      let senderName = '';
+      try { senderName = String(JSON.parse(r.origin || '{}').user_name || '').trim(); } catch { senderName = ''; }
+      const name = senderName || who;
+      let uid = senderUid;
+      if (!uid && near) {
         const cands = near.all(chat, t - MATCH_MS, t + 30_000, t);
-        const hit = cands.find((c) => who && c.uid && String(c.name || '').trim() === who)
-          || (!who && cands.filter((c) => c.uid).length === 1 ? cands.find((c) => c.uid) : null);
-        uid = hit ? String(hit.uid) : who ? uidOfName(chat, who) : '';
+        const hit = cands.find((c) => name && c.uid && String(c.name || '').trim() === name)
+          || (!name && cands.filter((c) => c.uid).length === 1 ? cands.find((c) => c.uid) : null);
+        uid = hit ? String(hit.uid) : name ? uidOfName(chat, name) : '';
       }
-      rows.push({ t, uid, name: who, thread: chat, group: true });
+      rows.push({ t, uid, name, thread: chat, group: true });
     }
   } finally { zdb?.close(); }
   return { builtAt: now, rows };
 }
 
-export function createBotUses({ hermesHome, stateDb = '', zaloDb = '', owners = () => [], groupName = () => '', personName = () => '', isKnown = null, now = Date.now }) {
+export function createBotUses({ hermesHome, stateDb = '', zaloDb = '', groupName = () => '', personName = () => '', isKnown = null, now = Date.now }) {
   const file = join(hermesHome, 'zalo', 'bot-uses.jsonl');
   const backfillFile = join(hermesHome, 'zalo', 'bot-uses-backfill.json');
   let cache = { mtime: -1, rows: [] };
@@ -93,9 +103,11 @@ export function createBotUses({ hermesHome, stateDb = '', zaloDb = '', owners = 
     if (mtime !== cache.mtime) cache = { mtime, rows: parseLines(readFileSync(file, 'utf8')) };
     return cache.rows;
   }
-  function backfill() {
+  function backfill(hasLive) {
     const saved = readJson(backfillFile, null);
-    if (saved && Array.isArray(saved.rows)) return saved;
+    // Có sổ thật rồi thì bản dựng lại chỉ là nền lịch sử trước đó, không cần làm mới.
+    if (hasLive && saved && Array.isArray(saved.rows)) return saved;
+    // Chưa có sổ thật thì đây là nguồn duy nhất — dựng lại mỗi lần đọc cho kịp lượt mới (rẻ: quét state.db).
     let built = { builtAt: now(), rows: [] };
     try { built = buildBackfill({ stateDb, zaloDb, now: now() }); } catch (e) { console.error('[dashboard] không dựng lại được lượt dùng bot:', e?.message || e); }
     try { writeJsonAtomic(backfillFile, built); } catch { /* lần sau dựng lại */ }
@@ -108,13 +120,12 @@ export function createBotUses({ hermesHome, stateDb = '', zaloDb = '', owners = 
       const d = PERIODS.includes(Number(days)) ? Number(days) : 7;
       const t = now();
       const since = startOfDayVN(t) - (d - 1) * DAY;
-      const own = new Set(owners().map(String));
       const real = live();
       const firstLive = real.length ? Math.min(...real.map((r) => r.t)) : Infinity;
-      const old = backfill().rows.filter((r) => r.t < firstLive);
+      const old = backfill(real.length > 0).rows.filter((r) => r.t < firstLive);
       const approx = old.some((r) => r.t >= since);
-      // isKnown: UID có thật trong lịch sử tin nhắn của bot. UID lạ (người giả của test lọt vào sổ…) và dòng dựng lại chỉ có
-      // tên, không ra được UID, thì bỏ — để tên luôn khớp UID.
+      // isKnown: UID có thật trong lịch sử tin nhắn của bot — chặn UID lạ (người giả của test lọt vào sổ thật).
+      // Chỉ áp cho sổ thật: bản dựng lại lấy từ sổ phiên Hermes nên đáng tin, chỉ cần có UID để tên khớp UID.
       const known = new Map();
       const real_ = (uid) => {
         if (!isKnown) return true;
@@ -122,7 +133,10 @@ export function createBotUses({ hermesHome, stateDb = '', zaloDb = '', owners = 
         if (!known.has(uid)) { let ok = true; try { ok = Boolean(isKnown(uid)); } catch { /* không kiểm được: giữ */ } known.set(uid, ok); }
         return known.get(uid);
       };
-      const rows = [...old, ...real].filter((r) => r.t >= since && !r.owner && !(r.uid && own.has(r.uid)) && real_(r.uid));
+      const keep = (r, trusted) => (trusted ? (!isKnown || Boolean(r.uid)) : real_(r.uid))
+        && r.t >= since;
+      const rows = [...old.map((r) => ({ r, trusted: true })), ...real.map((r) => ({ r, trusted: false }))]
+        .filter(({ r, trusted }) => keep(r, trusted)).map(({ r }) => r);
       const board = (group) => {
         const map = new Map();
         for (const r of rows.filter((x) => x.group === group)) {

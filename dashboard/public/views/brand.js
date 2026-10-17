@@ -1,4 +1,4 @@
-// Thương hiệu (spec §7.1): logo, tên hiển thị, màu chủ đạo, dòng "Vận hành bởi 2Anh AI" — có khung xem trước.
+// Thương hiệu (spec §7.1): logo, tên hiển thị, màu chủ đạo, dòng "Vận Hành bởi Cá Heo AI" — có khung xem trước.
 import { useEffect, useRef, useState } from '../vendor/hooks.mjs';
 import { api } from '../api.js';
 import { html, BrandMark, Icon, Live, PageHead, PoweredBy, Spinner } from '../ui.js';
@@ -213,7 +213,7 @@ export function Brand() {
           </fieldset>
           <label class="check" for="brand-powered">
             <input id="brand-powered" type="checkbox" checked=${form.poweredBy} onChange=${(e) => set('poweredBy')(e.currentTarget.checked)} />
-            Hiện dòng "Vận hành bởi 2Anh AI"</label>
+            Hiện dòng "Vận Hành bởi Cá Heo AI"</label>
           <div class="row form-end">
             <button class="btn btn-primary" disabled=${busy !== '' || !dirty || !info.ok}>${busy === 'save' ? 'Đang lưu…' : 'Lưu'}</button>
             <button type="button" class="btn btn-secondary" disabled=${busy !== ''} onClick=${reset}>
