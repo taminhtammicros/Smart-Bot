@@ -99,6 +99,7 @@ export const ACTION_LABELS = {
 
 const REASONS = {
   operation_failed: 'Zalo từ chối hoặc mạng lỗi',
+  recipient_not_friend: 'Tài khoản Zalo nhận mã chưa kết bạn với bot — hãy nhắn cho bot trước',
   zalo_not_logged_in: 'Bot chưa đăng nhập Zalo',
   owner_required: 'Không đủ quyền',
   cross_thread_denied: 'Không đủ quyền ở hội thoại này',

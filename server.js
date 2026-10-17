@@ -73,6 +73,8 @@ app.use(express.json());
 
 // --- Dashboard control (Bearer ZALO_BRIDGE_TOKEN, không qua CSRF /api) ---
 const groupDirectory = createGroupDirectory({ getApi: () => api });
+// `api` đổi khi đăng nhập lại — đọc qua hàm, không chụp giá trị lúc khởi động.
+const zaloDirectory = createZaloDirectory({ getApi: () => api, acquire: acquireSendQuota, audit: auditDashboardAction });
 // Thành viên nhóm cho ô gợi ý @ trên dashboard: đệm 10 phút mỗi nhóm (tra Zalo mất vài giây).
 const memberCache = new Map();
 app.use('/control', createControlRouter({
@@ -115,11 +117,20 @@ app.use('/control', createControlRouter({
       api, threadId: zaloUid, threadType: 0, actorUid: actor, actorRole: 'dashboard', action: 'dashboard_login_code', remember: false,
       text: `Mã đăng nhập dashboard: ${code}
 Mã có hiệu lực 5 phút. Đừng đưa mã này cho ai.`,
+      // Zalo chỉ cho bot nhắn riêng cho bạn bè. Kiểm trước để báo đúng lý do thay vì "Zalo từ chối hoặc mạng lỗi".
+      precheck: async () => {
+        let list = [];
+        try { list = await zaloDirectory.friends(); } catch { return; } // không tra được bạn bè thì cứ gửi
+        if (list.length && !list.some((f) => String(f.uid) === String(zaloUid))) {
+          const err = new Error('Tài khoản Zalo này chưa kết bạn với bot — hãy nhắn cho bot một tin trước, rồi gửi lại mã.');
+          err.auditReason = 'recipient_not_friend';
+          throw err;
+        }
+      },
     });
   },
   groups: () => groupDirectory.list(),
-  // `api` đổi khi đăng nhập lại — đọc qua hàm, không chụp giá trị lúc khởi động.
-  directory: createZaloDirectory({ getApi: () => api, acquire: acquireSendQuota, audit: auditDashboardAction }),
+  directory: zaloDirectory,
 }));
 // Trang quét QR cũ ở cổng này đã bỏ: đăng nhập Zalo nằm ở dashboard (mục Tài khoản Zalo). Ai mở nhầm cổng sidecar
 // thì chuyển thẳng tới đó. Cổng này giờ chỉ còn /control (dashboard gọi) và /api/status, /api/health (kiểm tra).

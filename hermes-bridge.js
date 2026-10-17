@@ -816,7 +816,7 @@ export async function sendFileNotice({ api, threadId, threadType, path, actorUid
 
 export async function sendSystemNotice({
   api, threadId, threadType, text, mentions = null, quote = null,
-  actorUid = 'system', actorRole = 'system', action = 'send_system_notice', remember = true,
+  actorUid = 'system', actorRole = 'system', action = 'send_system_notice', remember = true, precheck = null,
 }) {
   if (!activeStore) throw new Error('Zalo store is not ready');
   const requestId = `system-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -840,6 +840,8 @@ export async function sendSystemNotice({
     const content = { msg: String(text) };
     if (mentions?.length) content.mentions = mentions;
     if (quote) content.quote = quote;
+    // Kiểm trước điều kiện gửi (vd. người nhận có phải bạn bè) để lỗi ghi đúng lý do, không đẩy một tin chắc chắn hỏng sang Zalo.
+    if (precheck) await precheck();
     let result;
     try {
       result = await api.sendMessage(content, String(threadId), threadType);
@@ -856,8 +858,9 @@ export async function sendSystemNotice({
     return result;
   } catch (error) {
     if (noStoreKey) noStoreTexts.delete(noStoreKey);
-    activeStore.finishAudit(requestId, 'failed', { error: 'operation_failed' });
-    activeHealth?.recordError('system_notice_failed', 'operation_failed');
+    const reason = error?.auditReason || 'operation_failed';
+    activeStore.finishAudit(requestId, 'failed', { error: reason });
+    activeHealth?.recordError('system_notice_failed', reason);
     throw error;
   }
 }

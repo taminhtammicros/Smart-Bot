@@ -1105,6 +1105,30 @@ test('sendSystemNotice ghi đúng người gửi và hành động do dashboard 
   }
 });
 
+test('sendSystemNotice: precheck hỏng thì không gửi và ghi đúng lý do (auditReason)', async (t) => {
+  const store = testStore(t);
+  let sends = 0;
+  const api = { sendMessage: () => { sends += 1; return Promise.resolve({ message: { msgId: 'x', cliMsgId: 'xc' } }); } };
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const requestIds = [];
+  const beginAudit = store.beginAudit;
+  store.beginAudit = (entry) => { requestIds.push(entry.requestId); return beginAudit(entry); };
+  try {
+    const boom = Object.assign(new Error('chưa kết bạn'), { auditReason: 'recipient_not_friend' });
+    await assert.rejects(
+      () => sendSystemNotice({ api, threadId: 'dm-1', threadType: 0, text: 'Mã 123456', remember: false, precheck: () => { throw boom; } }),
+      boom,
+    );
+    assert.equal(sends, 0, 'không đẩy tin chắc chắn hỏng sang Zalo');
+    const trail = store.getAuditTrail(requestIds.at(-1));
+    assert.equal(trail.at(-1).status, 'failed');
+    assert.equal(trail.at(-1).error, 'recipient_not_friend');
+  } finally {
+    stopHermesBridge();
+  }
+});
+
 test('sendSystemNotice remember:false không lưu nội dung nhưng vẫn ghi audit', async (t) => {
   const store = testStore(t);
   const api = { sendMessage: () => Promise.resolve({ message: { msgId: 'r-1', cliMsgId: 'r-c1' } }) };
