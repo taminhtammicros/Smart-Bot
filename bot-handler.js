@@ -7,6 +7,7 @@ import { createStickerDirectory, enrichSticker } from './zalo-stickers.js';
 import { createWelcomer } from './zalo-welcome.js';
 import { createFriendManager, friendToolsEnabled, setActiveFriendManager } from './zalo-friends.js';
 import { createOwnerMentionNotifier, envFlag } from './owner-mention.js';
+import { rememberQuestion, forgetQuestions } from './zalo-reply-anchor.js';
 import { join } from 'node:path';
 
 /**
@@ -221,6 +222,9 @@ export function setupBotListener(api, profile = null, {
     friends?.stop();
     mentionNotifier = null;
     setActiveFriendManager(null);
+    // Neo trả lời thuộc về phiên vừa dừng: đổi tài khoản/đăng nhập lại mà giữ
+    // neo cũ thì câu trả lời đầu tiên trích dẫn một tin của phiên trước.
+    forgetQuestions();
     for (const [event, handler] of handlers) api.listener.off?.(event, handler);
     health?.setListenerState(null);
     try { api.listener.stop?.(); } catch (err) {
@@ -270,6 +274,12 @@ async function handleIncomingMessage(api, msg, stickers = null) {
     });
   }
 
+  // Nhớ đúng tin của người hỏi để câu trả lời trích dẫn lại chính nó. Làm
+  // trước mọi nhánh thoát: Hermes trả lời bằng đường riêng (bridge), nhưng neo
+  // thì phải có sẵn từ lúc tin tới. Tên người hỏi do Zalo vẽ theo UID trong
+  // khung trích dẫn, nên đổi tên hiển thị sau này vẫn ra đúng tên.
+  rememberQuestion(msg);
+
   const where = isGroup ? `Nhóm ${threadId}` : `DM ${threadId}`;
   console.log(`[bot] 📩 [${where}] ${msg.data?.dName || '?'} (${senderUid}): ${content.slice(0, 80)}`);
 
@@ -287,6 +297,7 @@ async function handleIncomingMessage(api, msg, stickers = null) {
         api,
         threadId,
         threadType,
+        anchorUid: senderUid,
         text: [
           `UID Zalo của bạn: ${senderUid}`,
           '',
@@ -328,6 +339,9 @@ async function handleIncomingMessage(api, msg, stickers = null) {
       api,
       threadId,
       threadType,
+      // Báo lỗi cũng là câu trả lời cho đúng người vừa gọi bot: neo vào tin
+      // của họ để trong nhóm đông người vẫn rõ bot đang đáp ai.
+      anchorUid: senderUid,
       text: 'Mình đang mất kết nối với bộ não xử lý nên chưa trả lời được 😔 Bạn nhắn lại giúp mình sau ít phút nhé!',
     });
   } catch (err) {

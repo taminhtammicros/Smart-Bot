@@ -12,6 +12,7 @@ import { openZaloStore } from './zalo-store.js';
 import { authorizeBridgeCommand } from './zalo-policy.js';
 import { readWelcomeConfig, updateWelcomeGroup } from './zalo-welcome.js';
 import { friendToolsEnabled, getActiveFriendManager } from './zalo-friends.js';
+import { quoteForAsk } from './zalo-reply-anchor.js';
 
 const FRIEND_TOOLS_OFF = 'Tính năng kết bạn đang tắt — bật ZALO_FRIEND_TOOLS=true trong .env của Hermes';
 
@@ -815,7 +816,7 @@ export async function sendFileNotice({ api, threadId, threadType, path, actorUid
 }
 
 export async function sendSystemNotice({
-  api, threadId, threadType, text, mentions = null, quote = null,
+  api, threadId, threadType, text, mentions = null, quote = null, anchorUid = null,
   actorUid = 'system', actorRole = 'system', action = 'send_system_notice', remember = true, precheck = null,
 }) {
   if (!activeStore) throw new Error('Zalo store is not ready');
@@ -839,7 +840,11 @@ export async function sendSystemNotice({
   try {
     const content = { msg: String(text) };
     if (mentions?.length) content.mentions = mentions;
-    if (quote) content.quote = quote;
+    // Neo trả lời: thông báo này là câu trả lời cho một người hỏi cụ thể thì
+    // trích dẫn đúng tin của họ. Không áp cho thông báo hệ thống/định kỳ — neo
+    // chỉ dành cho lượt có người hỏi.
+    const attach = quote || (anchorUid ? quoteForAsk(threadId, threadType, anchorUid) : null);
+    if (attach) content.quote = attach;
     // Kiểm trước điều kiện gửi (vd. người nhận có phải bạn bè) để lỗi ghi đúng lý do, không đẩy một tin chắc chắn hỏng sang Zalo.
     if (precheck) await precheck();
     let result;
@@ -1007,6 +1012,14 @@ async function handleCommand(ws, cmd) {
         : { members: [], canMentionAll: false };
 
       let lastMsgId = null;
+      // Neo trả lời: câu trả lời này là của chính người vừa hỏi thì trích dẫn
+      // đúng tin của họ. Zalo vẽ tên người được trích theo UID trong khung, nên
+      // người đọc thấy đúng tên người hỏi và biết bot đang trả lời câu nào.
+      // Hermes/adapter có gửi sẵn quote (vd. giữ luồng khi được reply) thì tôn
+      // trọng quote đó, không đè bằng neo tự động. Kết quả của việc hẹn giờ
+      // cũng không neo: nó không phải câu trả lời cho lượt hỏi vừa rồi.
+      const quote = cmd.quote
+        || (cmd.auth?.cronJobId ? null : quoteForAsk(cmd.threadId, threadType, cmd.auth?.actorUid));
       for (let i = 0; i < chunks.length; i++) {
         const item = chunks[i];
         const content = { msg: item.msg };
@@ -1019,7 +1032,7 @@ async function handleCommand(ws, cmd) {
         });
         if (mentions.length) content.mentions = mentions;
         // Chỉ trích dẫn (quote) ở tin đầu tiên nếu có
-        if (i === 0 && cmd.quote) content.quote = cmd.quote;
+        if (i === 0 && quote) content.quote = quote;
 
         // Nếu có nhiều hơn 1 tin, từ tin thứ 2 trở đi cần qua limiter bình thường
         if (i > 0) {
@@ -1041,9 +1054,14 @@ async function handleCommand(ws, cmd) {
           // Có mã lỗi dạng số nghĩa là máy chủ đã từ chối, tin chưa đi, nên gửi
           // lại đúng chunk này dạng chữ thường: mất định dạng còn hơn mất cả tin.
           // Lỗi mạng không có mã số thì không gửi lại, tránh tin bị lặp.
-          if (!(content.styles || content.mentions) || !/^-?\d+$/.test(String(err?.code ?? ''))) throw err;
-          console.warn(`[bridge] Zalo từ chối chunk ${i + 1}/${chunks.length} có định dạng/tag (mã ${err.code}) — gửi lại dạng chữ thường`);
-          const { styles: _dropped, mentions: _droppedMentions, ...plain } = content;
+          //
+          // Trích dẫn cũng nằm trong diện bị bỏ khi gửi lại: Zalo đổi cách nhận
+          // một trường qmsg* là cả câu trả lời bị trả về, mà nội dung mới là thứ
+          // người hỏi cần.
+          const droppable = content.styles || content.mentions || content.quote;
+          if (!droppable || !/^-?\d+$/.test(String(err?.code ?? ''))) throw err;
+          console.warn(`[bridge] Zalo từ chối chunk ${i + 1}/${chunks.length} có định dạng/tag/trích dẫn (mã ${err.code}) — gửi lại dạng chữ thường`);
+          const { styles: _dropped, mentions: _droppedMentions, quote: _droppedQuote, ...plain } = content;
           res = await zaloApi.sendMessage(plain, String(cmd.threadId), threadType);
         }
         rememberOutboundResult(res, cmd.threadId, threadType, item.msg);

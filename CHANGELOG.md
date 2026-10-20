@@ -4,6 +4,15 @@ Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
 ## [Chưa phát hành]
 
+### Thêm — Bot trả lời bằng cách trích dẫn đúng câu hỏi của người hỏi
+
+- Câu trả lời giờ là một tin **trích dẫn (quote)** đúng tin mà người hỏi vừa gửi. Zalo vẽ tên người được trích theo UID trong khung tin, nên người đọc thấy đúng tên người hỏi — kể cả khi họ đổi tên hiển thị sau đó — và biết bot đang trả lời câu nào. Trước đây câu trả lời trôi nổi giữa hội thoại, trong nhóm đông người không rõ đang đáp ai.
+- Hai người hỏi chen nhau trong cùng nhóm thì mỗi người có neo riêng: câu trả lời cho ai trích đúng câu của người đó, không lẫn sang câu của người khác.
+- Thông báo định kỳ, tin hệ thống và câu trả lời cho người khác **không** trích dẫn gì — trích dẫn sai người còn tệ hơn không trích.
+- Neo tự hết hạn sau 30 phút và bị xoá khi listener dừng/đổi tài khoản, nên không dính sang phiên sau.
+- Chỉ trích dẫn tin chữ. Tin đính kèm, nhãn dán và tin do chính bot gửi không thành neo (`zalo-reply-anchor.js`).
+- Zalo từ chối khung trích dẫn (mã lỗi số) thì câu trả lời được gửi lại dạng chữ thường, chỉ mất phần trích dẫn — không mất nội dung.
+
 ### Sửa — Giao diện tối cho toàn bộ trang web (đồng bộ caheoai.com)
 
 - Mọi trang của bảng điều khiển (trang đăng nhập, thanh bên, thẻ, bảng, biểu đồ, hộp thoại, Nhật ký, Phân quyền Bot, Thư mục, Tri thức, Thương hiệu…) chuyển sang nền tối trung tính. Chỉ sửa tệp `dashboard/public/style.css`; không đổi hành vi, dữ liệu, đường dẫn hay quyền.

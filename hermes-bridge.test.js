@@ -1504,3 +1504,165 @@ test('history_search chỉ đọc kho của đúng hội thoại, không gọi Z
     stopHermesBridge();
   }
 });
+
+test('câu trả lời trích dẫn đúng tin của người hỏi, không lẫn câu của người khác', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    // Hai người hỏi chen nhau trong cùng nhóm.
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-lien', cliMsgId: 'c-lien', uidFrom: 'lien', dName: 'Liên', content: 'hỏi bài 5', ts: 100 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-trang', cliMsgId: 'c-trang', uidFrom: 'trang', dName: 'Trang', content: 'hỏi bài 6', ts: 200 } });
+
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'a-lien', threadId: 'g1', threadType: 1, text: 'Bài 5 giải thế này nhé.',
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'a-lien');
+    assert.equal(ack.ok, true, ack.error);
+
+    assert.equal(sent[0].msg, 'Bài 5 giải thế này nhé.');
+    assert.equal(sent[0].quote.uidFrom, 'lien');
+    assert.equal(sent[0].quote.content, 'hỏi bài 5');
+    assert.equal(sent[0].quote.msgType, 'webchat');
+    assert.equal(sent[0].quote.msgId, 'm-lien');
+    assert.equal(sent[0].quote.cliMsgId, 'c-lien');
+    assert.equal(sent[0].quote.ts, 100);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('người không phải người vừa hỏi (lịch định kỳ, thông báo) thì không trích dẫn ai', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-ask', cliMsgId: 'c-ask', uidFrom: 'lien', dName: 'Liên', content: 'hỏi bài', ts: 100 } });
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'cron', threadId: 'g1', threadType: 1, text: 'Nhắc họp lúc 9h',
+      auth: { actorUid: '', actorRole: 'system', sourceThreadId: '', sourceThreadType: 0, confirmed: false },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'cron');
+
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote, undefined);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('quote Hermes gửi sẵn được tôn trọng, không bị thay bằng neo tự động', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-ask', cliMsgId: 'c-ask', uidFrom: 'lien', dName: 'Liên', content: 'câu hỏi', ts: 100 } });
+    // JSON qua WebSocket bỏ trường undefined, nên quote tới bridge không có propertyExt.
+    const explicit = {
+      content: 'tin được reply', msgType: 'webchat', ttl: 0, ts: 50,
+      msgId: 'm-quoted', cliMsgId: 'c-quoted', uidFrom: 'trang',
+    };
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'explicit', threadId: 'g1', threadType: 1, text: 'trả lời', quote: explicit,
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'explicit');
+
+    assert.equal(ack.ok, true, ack.error);
+    assert.deepEqual(sent[0].quote, explicit);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('Zalo từ chối trích dẫn (mã số) thì câu trả lời vẫn tới, chỉ mất phần trích dẫn', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      if (content.quote) return Promise.reject(zaloRejection());
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-ask', cliMsgId: 'c-ask', uidFrom: 'lien', dName: 'Liên', content: 'câu hỏi', ts: 100 } });
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'retry', threadId: 'g1', threadType: 1, text: 'câu trả lời',
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'retry');
+
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].msg, 'câu trả lời');
+    assert.equal(sent[1].quote, undefined);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('kết quả việc hẹn giờ của chính người đã hỏi vẫn không trích dẫn câu hỏi cũ', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-ask', cliMsgId: 'c-ask', uidFrom: 'owner', dName: 'Chủ nhân', content: 'nhắc tôi họp lúc 9h', ts: 100 } });
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'cron-owner', threadId: 'g1', threadType: 1, text: 'Nhắc họp lúc 9h',
+      auth: { actorUid: 'owner', actorRole: 'owner', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false, cronJobId: 'job-1' },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'cron-owner');
+
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote, undefined);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});

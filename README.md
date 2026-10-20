@@ -92,6 +92,7 @@ Plugin nền tảng của Hermes lại viết bằng **Python**. Nên bản này
 * Nhận diện UID Zalo thật, loại bỏ số điện thoại điền nhầm chỗ
 
 **Trả lời**
+* Câu trả lời **trích dẫn (quote) đúng tin của người hỏi** — Zalo vẽ tên người được trích theo UID, nên trong nhóm đông người vẫn thấy rõ bot đang đáp ai và đáp câu nào. Hai người hỏi chen nhau thì mỗi người có neo riêng; thông báo định kỳ, tin hệ thống và câu trả lời cho người khác không trích dẫn gì
 * Markdown của Hermes được dịch sang định dạng gốc của Zalo — in đậm, đỏ, xanh lá, cam, vàng, nghiêng, gạch ngang
 * Thả cảm xúc theo ngữ cảnh câu chữ (55 icon), báo đã đọc, hiệu ứng đang soạn tin
 * Tính cách đặt ở `platform_hints.zalo` của Hermes — một chỗ duy nhất, không rải ra nhiều tệp

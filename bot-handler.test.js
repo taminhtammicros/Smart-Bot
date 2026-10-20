@@ -346,3 +346,39 @@ test('kết nối ổn định sau khi bị đá thì xoá needsRelogin', async 
   await waitFor(() => health.needs === false);
   stop();
 });
+
+test('tin tới trong nhóm thành neo trả lời cho đúng người hỏi, kể cả khi Hermes đã cắm', async (t) => {
+  const { listener } = await harness(t);
+  const { quoteForAsk, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  listener.emit('message', incoming({ text: 'Bài 5 làm sao ạ?', senderUid: 'uid-lien', threadId: 'group-9', type: ThreadType.Group }));
+  await waitFor(() => quoteForAsk('group-9', ThreadType.Group, 'uid-lien') !== null, 'neo câu hỏi');
+
+  const quote = quoteForAsk('group-9', ThreadType.Group, 'uid-lien');
+  assert.equal(quote.uidFrom, 'uid-lien');
+  assert.equal(quote.content, 'Bài 5 làm sao ạ?');
+  assert.equal(quote.msgId, 'msg-group-9');
+  assert.equal(quote.msgType, 'webchat');
+  // Người khác trong nhóm không dùng ké neo này.
+  assert.equal(quoteForAsk('group-9', ThreadType.Group, 'uid-trang'), null);
+});
+
+test('tin của chính bot và tin nhãn dán không tạo neo trả lời', async (t) => {
+  const { listener } = await harness(t);
+  const { quoteForAsk, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  const own = incoming({ text: 'câu trả lời của bot', senderUid: 'bot-uid', threadId: 'group-7', type: ThreadType.Group });
+  own.isSelf = true;
+  listener.emit('message', own);
+  const sticker = incoming({ text: '', senderUid: 'uid-sticker', threadId: 'group-8', type: ThreadType.Group });
+  sticker.data = { ...sticker.data, msgType: 'chat.sticker', content: { id: 4001 } };
+  listener.emit('message', sticker);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  assert.equal(quoteForAsk('group-7', ThreadType.Group, 'bot-uid'), null);
+  assert.equal(quoteForAsk('group-8', ThreadType.Group, 'uid-sticker'), null);
+});
