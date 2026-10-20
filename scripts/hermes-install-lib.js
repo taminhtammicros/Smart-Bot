@@ -165,6 +165,14 @@ export function mergeHermesConfig(text, { bridgeToken, vieneu = null, guideHeadi
   }
 
   const display = ['display', 'platforms', 'zalo'];
+  // Zalo hay bị hỏi dồn trong nhóm đông người. Mặc định `interrupt` của Hermes
+  // cắt ngang lượt đang chạy và gộp câu mới vào lượt đó, nên câu hỏi trước bị
+  // bỏ dở. `queue` không cắt ngang nữa và giữ thứ tự đến — xem `_enqueue_fifo`
+  // trong gateway/run_busy.py. Lưu ý: Hermes vẫn nối các tin liền nhau của cùng
+  // một người thành một lượt (merge_pending_message_event, merge_text=True),
+  // nên `queue` là "không mất câu", không phải "mỗi câu một lượt". Chỉ đặt khi
+  // khách chưa chọn: ai đã cố ý để `interrupt`/`steer` thì giữ nguyên.
+  setDefault(['display', 'busy_input_mode'], 'queue');
   setDefault([...display, 'tool_progress'], 'off');
   setDefault([...display, 'long_running_notifications'], false);
   setDefault([...display, 'busy_ack_detail'], false);

@@ -1626,6 +1626,37 @@ class ZaloAdapterMediaContextTest(unittest.IsolatedAsyncioTestCase):
             "confirmed": True,
         })
 
+    async def test_send_frame_carries_every_message_of_the_turn_that_started_it(self):
+        # Bot xếp hàng câu hỏi: lượt của Q1 chạy sau khi người đó đã gửi Q2.
+        # auth.msgIds là danh sách tin đã khởi động lượt — sidecar trích tin
+        # ĐẦU của cụm. Phải là danh sách chứ không phải một mã: Hermes có lúc
+        # gộp chữ giữ mã tin đầu, có lúc (nhánh debounce) ghi đè bằng tin cuối.
+        adapter = self.make_adapter()
+        socket = CapturingSocket()
+        adapter._ws = socket
+        adapter._self_profile = {"user_id": "bot-uid", "display_name": "Lăng Tiêu"}
+        turn_token = zalo_tools._TURN.set({
+            "sender_uid": "member-1",
+            "thread_id": "group-1",
+            "is_group": True,
+            "is_owner": False,
+            "text": "câu 1\ncâu 3",
+            "msg_id": "m-3",
+            "msg_ids": ["m-1", "m-3"],
+        })
+        try:
+            with patch.object(zalo_adapter, "_zalo_tools", return_value=zalo_tools):
+                pending = asyncio.create_task(adapter.send("group-1", "Trả lời câu 1", metadata={"chat_type": "group"}))
+                await asyncio.sleep(0)
+                frame = socket.frames[0]
+                await adapter._dispatch({"type": "ack", "reqId": frame["reqId"], "ok": True})
+                await pending
+        finally:
+            zalo_tools._TURN.reset(turn_token)
+
+        self.assertEqual(frame["auth"]["msgIds"], ["m-1", "m-3"])
+        self.assertEqual(frame["auth"]["actorUid"], "member-1")
+
     async def test_history_and_undo_frames_carry_owner_context_and_confirmation(self):
         adapter = self.make_adapter()
         socket = CapturingSocket()

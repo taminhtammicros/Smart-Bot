@@ -1018,6 +1018,12 @@ class ZaloAdapter(BasePlatformAdapter):
             "reply_cli_msg_id": str(quote.get("cliMsgId") or "") if quote else "",
             "reply_is_own": quote_is_own,
             "msg_id": msg_id,
+            # Mã tin của MỌI tin gộp vào lượt này. Hermes gộp tin liền nhau của
+            # cùng người rồi tra cứu theo `message_id` của sự kiện; nhánh gộp
+            # giữ mã tin đầu, nhánh debounce ghi đè bằng mã tin cuối. Ghi ở đây
+            # (không phải lúc chạy lượt) nên không nhầm người: mỗi tin tới đều
+            # tự ghi mã của chính nó.
+            "msg_ids": [msg_id] if msg_id else [],
         }
         self._remember_turn(turn)
         _zalo_tools().set_turn_context(**turn)
@@ -1918,25 +1924,40 @@ class ZaloAdapter(BasePlatformAdapter):
         return chosen
 
     def _with_followup_attachments(self, turn: Dict[str, Any]) -> Dict[str, Any]:
-        """Gom thêm tệp của các tin CÙNG người gửi tiếp sau trong cùng hội thoại.
+        """Gom tệp và mã tin của các tin CÙNG người gửi tiếp sau trong hội thoại.
 
         Bot đang bận thì Hermes gộp tin gửi tiếp vào lượt đang chờ nhưng giữ
         message_id của tin đầu — mô hình thấy đủ tệp, còn zalo_pdf chỉ thấy tệp
         của tin đầu ("gửi A.pdf, rồi B.pdf, gộp hai cái này" báo thiếu tệp). Chỉ
-        lấy tệp của chính người đó, không bao giờ lấy của người khác.
+        lấy tệp của chính người đó, không bao giờ lấy của người khác. Mã tin cũng
+        gom theo cách đó để câu trả lời trích đúng câu đầu của cụm.
         """
         attachments = list(turn.get("attachments") or [])
         seen = {item.get("path") for item in attachments}
+        # Cùng một lượt = tin gửi tiếp của CHÍNH người đó trước khi lượt kịp
+        # chạy. Hermes giữ mã tin đầu của cụm khi gộp, nhưng nhánh debounce lại
+        # ghi đè bằng mã tin cuối, nên gom đủ mã ở đây rồi sidecar trích tin
+        # đầu. Không có bước này thì cả hai câu của một người cùng trích câu
+        # cuối — đúng lỗi "trả lời câu 1 nhưng trích câu 3".
+        burst_ids = list(turn.get("msg_ids") or ([] if not turn.get("msg_id") else [turn.get("msg_id")]))
         for other in list(self._turns.values()):
             if (other.get("thread_id") != turn.get("thread_id")
                     or other.get("sender_uid") != turn.get("sender_uid")
                     or other.get("seq", 0) <= turn.get("seq", 0)):
                 continue
+            for other_id in other.get("msg_ids") or ([other.get("msg_id")] if other.get("msg_id") else []):
+                if other_id and other_id not in burst_ids:
+                    burst_ids.append(other_id)
             for item in other.get("attachments") or []:
                 if item.get("path") not in seen:
                     seen.add(item.get("path"))
                     attachments.append(item)
-        return {**turn, "attachments": attachments} if len(attachments) > len(turn.get("attachments") or []) else turn
+        enriched = dict(turn)
+        if len(attachments) > len(turn.get("attachments") or []):
+            enriched["attachments"] = attachments
+        if burst_ids != list(turn.get("msg_ids") or []):
+            enriched["msg_ids"] = burst_ids
+        return enriched
 
     def _bind_turn_for_source(self, source, uid: str) -> bool:
         """Gắn danh tính đúng của lượt này trước khi agent chạy.

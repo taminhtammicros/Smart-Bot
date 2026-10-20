@@ -27,7 +27,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import group_permissions
 from . import ai_events  # noqa: F401  (nạp sẵn: adapter ghi lượt đọc ảnh qua _zalo_tools_module("ai_events"))
@@ -75,7 +75,8 @@ _CONFIRMATION_TTL_SECONDS = 300
 def set_turn_context(*, sender_uid: str, thread_id: str, is_group: bool,
                      is_owner: bool, text: str = "", reply_msg_id: str = "",
                      reply_cli_msg_id: str = "", reply_is_own: bool = False,
-                     msg_id: str = "", sender_name: str = "") -> None:
+                     msg_id: str = "", sender_name: str = "",
+                     msg_ids: Optional[Sequence[str]] = None) -> None:
     """Adapter gọi trước khi đẩy tin vào agent.
 
     ``text`` là NGUYÊN VĂN tin nhắn người dùng vừa gõ, chưa qua tay mô hình.
@@ -94,6 +95,10 @@ def set_turn_context(*, sender_uid: str, thread_id: str, is_group: bool,
         "reply_cli_msg_id": str(reply_cli_msg_id or ""),
         "reply_is_own": bool(reply_is_own),
         "msg_id": str(msg_id or ""),
+        # Mọi tin đã gộp vào lượt này, theo thứ tự tới. Hermes có lúc giữ mã
+        # tin đầu của cụm, có lúc ghi đè bằng tin cuối, nên một mã không đủ
+        # để biết câu trả lời phải trích câu nào.
+        "msg_ids": [str(m) for m in (msg_ids or []) if str(m)],
         "sender_name": str(sender_name or ""),
     })
 
@@ -135,6 +140,16 @@ def current_authorization(*, confirmed: bool = False) -> Dict[str, Any]:
     }
     if turn.get("cron_job_id"):
         auth["cronJobId"] = str(turn["cron_job_id"])
+    # Các tin đã khởi động lượt này, theo thứ tự tới. Sidecar trích tin ĐẦU
+    # của cụm: bot xếp hàng câu hỏi (display.busy_input_mode: queue), người
+    # hỏi có thể đã gửi thêm vài câu trước khi lượt này chạy — trích câu mới
+    # nhất là trích nhầm câu. Phải gửi cả danh sách vì Hermes lúc gộp chữ giữ
+    # mã tin đầu, lúc khác (nhánh debounce) lại ghi đè bằng tin cuối.
+    turn_ids = [str(m) for m in (turn.get("msg_ids") or []) if str(m)]
+    if turn.get("msg_id") and str(turn["msg_id"]) not in turn_ids:
+        turn_ids.append(str(turn["msg_id"]))
+    if turn_ids:
+        auth["msgIds"] = turn_ids
     if turn.get("sethome"):
         # Câu trả lời /sethome cho người lạ: kết nối Zalo vẫn cho gửi dù người này
         # chưa được nhắn riêng (dm-rules.js / zalo-policy.js).

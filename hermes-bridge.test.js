@@ -1543,6 +1543,136 @@ test('câu trả lời trích dẫn đúng tin của người hỏi, không lẫ
   }
 });
 
+test('hỏi dồn: lượt trả lời câu 1 trích câu 1 dù người đó đã gửi câu 2, 3', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    // Bot đang bận trả lời câu khác, người này gửi ba câu liên tiếp.
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm1', cliMsgId: 'c1', uidFrom: 'lien', dName: 'Liên', content: 'câu 1', ts: 100 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm2', cliMsgId: 'c2', uidFrom: 'lien', dName: 'Liên', content: 'câu 2', ts: 200 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm3', cliMsgId: 'c3', uidFrom: 'lien', dName: 'Liên', content: 'câu 3', ts: 300 } });
+
+    // Lượt xếp hàng cho câu 1: adapter gắn auth.msgId = m1.
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'q1', threadId: 'g1', threadType: 1, text: 'Trả lời câu 1',
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false, msgId: 'm1' },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'q1');
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote.msgId, 'm1');
+    assert.equal(sent[0].quote.content, 'câu 1');
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('cụm bị Hermes gộp: câu trả lời trích tin ĐẦU của cụm, không phải tin cuối', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    // Liên hỏi câu 1, Trang hỏi câu 2, Liên hỏi tiếp câu 3.
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm1', cliMsgId: 'c1', uidFrom: 'lien', dName: 'Liên', content: 'câu 1', ts: 100 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm2', cliMsgId: 'c2', uidFrom: 'trang', dName: 'Trang', content: 'câu 2', ts: 200 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm3', cliMsgId: 'c3', uidFrom: 'lien', dName: 'Liên', content: 'câu 3', ts: 300 } });
+
+    // Hermes gộp câu 1 và câu 3 của Liên thành một lượt, message_id bị ghi đè
+    // bằng tin cuối; adapter gửi kèm cả dãy tin đã khởi động lượt.
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'burst', threadId: 'g1', threadType: 1, text: 'Trả lời câu 1 và câu 3',
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false, msgIds: ['m1', 'm3'], msgId: 'm3' },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'burst');
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote.msgId, 'm1');
+    assert.equal(sent[0].quote.content, 'câu 1');
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('cụm bị gộp không làm lệch neo của người khác trong cùng nhóm', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm1', cliMsgId: 'c1', uidFrom: 'lien', dName: 'Liên', content: 'câu 1', ts: 100 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm2', cliMsgId: 'c2', uidFrom: 'trang', dName: 'Trang', content: 'câu 2', ts: 200 } });
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm3', cliMsgId: 'c3', uidFrom: 'lien', dName: 'Liên', content: 'câu 3', ts: 300 } });
+
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'trang', threadId: 'g1', threadType: 1, text: 'Trả lời câu 2',
+      auth: { actorUid: 'trang', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false, msgIds: ['m2'], msgId: 'm2' },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'trang');
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote.msgId, 'm2');
+    assert.equal(sent[0].quote.content, 'câu 2');
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('msgId không có neo thì không trích dẫn, tuyệt đối không lùi về câu mới nhất', async (t) => {
+  const sent = [];
+  const api = {
+    sendMessage(content) {
+      sent.push(content);
+      return Promise.resolve({ message: { msgId: `m${sent.length}` } });
+    },
+  };
+  const ws = await openBridge(t, api);
+  const { rememberQuestion, forgetQuestions } = await import('./zalo-reply-anchor.js');
+  forgetQuestions();
+  t.after(forgetQuestions);
+
+  try {
+    rememberQuestion({ threadId: 'g1', type: 1, isSelf: false, data: { msgId: 'm-new', cliMsgId: 'c-new', uidFrom: 'lien', dName: 'Liên', content: 'câu mới', ts: 100 } });
+    ws.send(JSON.stringify({
+      type: 'send', reqId: 'stale', threadId: 'g1', threadType: 1, text: 'Trả lời câu cũ',
+      auth: { actorUid: 'lien', actorRole: 'public', sourceThreadId: 'g1', sourceThreadType: 1, confirmed: false, msgId: 'm-gone' },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'stale');
+
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(sent[0].quote, undefined);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
 test('người không phải người vừa hỏi (lịch định kỳ, thông báo) thì không trích dẫn ai', async (t) => {
   const sent = [];
   const api = {

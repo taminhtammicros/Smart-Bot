@@ -92,7 +92,8 @@ Plugin nền tảng của Hermes lại viết bằng **Python**. Nên bản này
 * Nhận diện UID Zalo thật, loại bỏ số điện thoại điền nhầm chỗ
 
 **Trả lời**
-* Câu trả lời **trích dẫn (quote) đúng tin của người hỏi** — Zalo vẽ tên người được trích theo UID, nên trong nhóm đông người vẫn thấy rõ bot đang đáp ai và đáp câu nào. Hai người hỏi chen nhau thì mỗi người có neo riêng; thông báo định kỳ, tin hệ thống và câu trả lời cho người khác không trích dẫn gì
+* Câu trả lời **trích dẫn (quote) đúng tin của người hỏi** — Zalo vẽ tên người được trích theo UID, nên trong nhóm đông người vẫn thấy rõ bot đang đáp ai và đáp câu nào. Hai người hỏi chen nhau thì mỗi người có neo riêng; thông báo định kỳ, tin hệ thống và câu trả lời cho người khác không trích dẫn gì. Neo khoá theo **mã tin** chứ không theo người, nên khi một người gửi ba câu trước khi câu đầu được trả lời, câu trả lời của câu 1 vẫn trích đúng câu 1. Adapter gắn cả **dãy mã tin đã khởi động lượt** (`auth.msgIds`) chứ không một mã: Hermes lúc gộp giữ mã tin đầu, lúc debounce lại ghi đè bằng mã tin cuối, nên sidecar trích tin **sớm nhất** còn neo. Mã tin có mà không neo nào tra được (sidecar vừa khởi động lại) thì **không trích**, tuyệt đối không lùi về câu mới nhất — trích sai câu còn tệ hơn không trích
+* **Hỏi dồn thì bot trả lời lần lượt từng câu**, đúng thứ tự đến, không cắt ngang câu đang trả lời và không bỏ sót câu cũ — xem [Hỏi dồn trong nhóm](#hỏi-dồn-trong-nhóm)
 * Markdown của Hermes được dịch sang định dạng gốc của Zalo — in đậm, đỏ, xanh lá, cam, vàng, nghiêng, gạch ngang
 * Thả cảm xúc theo ngữ cảnh câu chữ (55 icon), báo đã đọc, hiệu ứng đang soạn tin
 * Tính cách đặt ở `platform_hints.zalo` của Hermes — một chỗ duy nhất, không rải ra nhiều tệp
@@ -283,6 +284,37 @@ Ngưỡng để rộng tay có chủ đích: 6 tin trong 15 giây nhanh hơn nh�
 
 Cả hai đều chỉnh được qua `.env` (xem `.env.example`).
 
+### Hỏi dồn trong nhóm
+
+Nhóm đông người thì nhiều người tag bot cùng lúc, và một người có khi gửi ba câu liền trước khi câu đầu được trả lời. Hermes có ba cách xử lý tin đến khi phiên đang bận (`display.busy_input_mode`), và **trình cài đặt đặt `queue`**:
+
+| Chế độ | Tin mới khi bot đang bận | Kết quả với người hỏi |
+|---|---|---|
+| `interrupt` (mặc định của Hermes) | `redirect()`/`interrupt()` lượt đang chạy, chèn câu mới vào chính lượt đó | câu hỏi trước bị bỏ dở, hai câu bị trả lời gộp — đúng kiểu "chỉ ưu tiên câu cuối" |
+| `steer` | chèn câu mới sau lời gọi công cụ kế tiếp | câu trả lời gộp, thứ tự không đoán được |
+| **`queue`** | tin mới đang bận **không** chèn vào lượt đang chạy; phía adapter giao từng tin cho gateway theo FIFO (`_enqueue_fifo`) | không cắt ngang, không mất câu; **nhưng xem ngay dưới: các tin liền nhau của cùng một người vẫn bị nối thành một lượt** |
+
+`queue` dùng `_enqueue_fifo` của gateway (`gateway/run_busy.py`) rồi hút dần sau mỗi lượt (`_run_agent_drain_pending`), và chặn luôn việc `interrupt`/`steer` chèn câu mới vào lượt đang chạy. Có một sự thật dễ hụt chân, đo bằng script chạy thẳng vào adapter của Hermes: **các tin liền nhau của cùng một người vẫn được nối thành một lượt, dù cách nhau bao lâu** — `câu 1` rồi `câu 2` cách 2 giây (lượt trước đã xong) vẫn vào agent thành `"câu 1\ncâu 2"`. Đó là thiết kế của Hermes (gộp "bursty multi-message thoughts", `merge_pending_message_event(..., merge_text=True)` trong `gateway/platforms/base.py`); `HERMES_GATEWAY_BUSY_TEXT_DEBOUNCE_SECONDS` chỉ chỉnh cửa sổ gộp khi tin đến *trong lúc bot đang bận*, không tắt được việc gộp.
+
+Hệ quả: `queue` bảo đảm **không mất câu, không cắt ngang, đúng thứ tự**; tách thành từng lượt riêng chỉ xảy ra khi tin đến lúc bot đang bận và cách nhau đủ xa, hoặc khi thuộc phiên khác (khác người gửi — xem ghi chú dưới). Muốn mỗi câu chắc chắn một lượt bất kể nhịp gửi thì phải tắt việc gộp chữ trong Hermes; Hermes chưa có công tắc cho việc đó, và repo này không vá lõi Hermes.
+
+Ba giới hạn cần biết trước:
+
+- **Trần 32 tin mỗi phiên** (`_BUSY_QUEUE_MAX_PENDING`). Vượt thì tin thêm bị bỏ và gateway ghi cảnh báo — người thật gần như không chạm tới; ai dồn hơn thì đã bị chống nhắn dồn chặn từ trước ở ngưỡng 6 tin/15 giây.
+- **Chi phí tính theo lượt, không theo tin.** Các tin bị nối thành một lượt thì vẫn một lượt gọi mô hình — đây là mặt tốt của việc Hermes gộp chữ; mặt xấu là một lượt phải trả lời nhiều câu cùng lúc trong một ngữ cảnh, nên câu trả lời dài hơn và có thể trả lời gộp. Muốn tách hẳn từng câu thì xem lại đoạn trên.
+- **Ảnh gửi liền một loạt vẫn gộp** thành một lượt theo ngữ nghĩa album. Đó là cố ý: ba ảnh của cùng một câu hỏi không phải ba câu hỏi.
+
+Ai muốn quay lại hành vi cũ thì đặt lại trong `config.yaml` của Hermes (trình cài không đè giá trị đã có):
+
+```yaml
+display:
+  busy_input_mode: interrupt   # hoặc steer
+```
+
+Đổi ngay lúc đang chạy bằng `/busy queue` hoặc `/busy interrupt` trong cuộc trò chuyện với bot.
+
+> Phiên tách theo **người gửi** khi `group_sessions_per_user: true` (mặc định của Hermes; trình cài đặt đặt `false` để cả nhóm chung một mạch hội thoại). Với `false`, cả nhóm xếp **một hàng duy nhất** — đúng "one by one" tuyệt đối, nhưng người này phải chờ người kia. Với `true`, mỗi người có hàng riêng, trả lời song song và nhóm có thể thấy hai câu trả lời xen kẽ. Xem [Session tách theo nhóm](#session-tách-theo-nhóm).
+
 ---
 
 ## Yêu cầu
@@ -363,7 +395,7 @@ hermes plugins enable zalo-tools
 
 **Bước 3 — khai báo cấu hình Zalo** trong `config.yaml` của Hermes.
 
-`npm run install:hermes` đã tự làm mục 1 và 2 dưới đây (xem `mergeHermesConfig` trong `scripts/hermes-install-lib.js:84-134`): tự thêm `known_plugin_toolsets.zalo` gồm `zalo_owner` + `zalo_public` nếu còn thiếu, và tự ghi `display.platforms.zalo` (`tool_progress: "off"`, `long_running_notifications: false`, `busy_ack_detail: false`, `show_reasoning: false`, cùng vài khoá khác) mà không đè lên giá trị bạn đã chỉnh tay. Chỉ cần tự gõ YAML dưới đây khi cài **thủ công** (không chạy `install:hermes`) hoặc khi trình cài báo lỗi lúc cập nhật `config.yaml`:
+`npm run install:hermes` đã tự làm mục 1 và 2 dưới đây (xem `mergeHermesConfig` trong `scripts/hermes-install-lib.js`): tự thêm `known_plugin_toolsets.zalo` gồm `zalo_owner` + `zalo_public` nếu còn thiếu, và tự ghi `display.busy_input_mode: queue` cùng `display.platforms.zalo` (`tool_progress: "off"`, `long_running_notifications: false`, `busy_ack_detail: false`, `show_reasoning: false`, cùng vài khoá khác) mà không đè lên giá trị bạn đã chỉnh tay. Chỉ cần tự gõ YAML dưới đây khi cài **thủ công** (không chạy `install:hermes`) hoặc khi trình cài báo lỗi lúc cập nhật `config.yaml`:
 
 ```yaml
 # 1. Khai báo toolset là "đã biết" để Hermes không tự cấp quyền chủ cho người lạ:
@@ -372,8 +404,10 @@ known_plugin_toolsets:
     - zalo_owner
     - zalo_public
 
-# 2. Tắt hiển thị tiến trình làm việc nội bộ ra nhóm Zalo (tránh lộ dòng 'Working...'):
+# 2. Tắt hiển thị tiến trình làm việc nội bộ ra nhóm Zalo (tránh lộ dòng 'Working...'),
+#    và xếp câu hỏi khi bot đang bận thay vì cắt ngang lượt đang trả lời:
 display:
+  busy_input_mode: queue
   platforms:
     zalo:
       tool_progress: "off"
@@ -808,7 +842,7 @@ Dashboard chỉ nghe ở `127.0.0.1`, **không có mật khẩu**. Đừng mở 
 | Bot im trong nhóm | Chưa tag đúng tên bot — mặc định chỉ trả lời khi được gọi |
 | `Unauthorized user ... on zalo` | Đúng như thiết kế: người đó không nằm trong allowlist |
 | Tin nhắn hiện `**` hoặc `[red]` | Sidecar chạy bản cũ — `git pull` rồi khởi động lại |
-| Cổng bị chiếm | Đổi `ZCA_PORT` / `ZALO_BRIDGE_PORT` trong `.env` |
+| Ba câu gửi liền bị bot trả lời gộp | `display.busy_input_mode: queue` đã bật, nhưng Hermes vẫn nối các tin liền nhau của cùng một người thành một lượt — xem [Hỏi dồn trong nhóm](#hỏi-dồn-trong-nhóm); tách hẳn từng câu là việc của Hermes, chưa có công tắc |
 
 Log của sidecar in ra terminal đang chạy `npm start`, đồng thời chép vào `logs/sidecar.log` kèm giờ (quá 5 MB tự dời sang `logs/sidecar.log.1`) — chạy ngầm vẫn tra lại được. Log Hermes nằm ở `<hermes>/logs/gateway.log`.
 

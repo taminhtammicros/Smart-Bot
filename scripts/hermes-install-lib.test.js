@@ -105,7 +105,15 @@ test('mergeHermesConfig adds safe defaults and preserves customer values', async
   assert.deepEqual(config.known_plugin_toolsets.zalo, ['customer_tool', 'zalo_owner', 'zalo_public', 'zalo_cron']);
   assert.equal(config.plugins.hook_callback_timeout, 0);
   assert.equal(config.display.platforms.zalo.tool_progress, 'off');
+  assert.equal(config.display.busy_input_mode, 'queue', 'hỏi dồn phải xếp hàng từng câu');
   assert.deepEqual(config.plugins.enabled, ['platforms/zalo', 'zalo-tools']);
+});
+
+test('mergeHermesConfig không đè chế độ bận khách đã tự chọn', () => {
+  const input = 'display:\n  busy_input_mode: steer\n';
+  const config = parse(mergeHermesConfig(input, {}));
+
+  assert.equal(config.display.busy_input_mode, 'steer');
 });
 
 test('mergeHermesConfig giữ comment và số nguyên lớn của khách', () => {

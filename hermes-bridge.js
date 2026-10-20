@@ -1018,8 +1018,19 @@ async function handleCommand(ws, cmd) {
       // Hermes/adapter có gửi sẵn quote (vd. giữ luồng khi được reply) thì tôn
       // trọng quote đó, không đè bằng neo tự động. Kết quả của việc hẹn giờ
       // cũng không neo: nó không phải câu trả lời cho lượt hỏi vừa rồi.
+      //
+      // `auth.msgIds` là các tin đã khởi động ĐÚNG lượt này. Bot xếp hàng câu
+      // hỏi, nên người hỏi có thể đã gửi thêm vài câu trước khi lượt này chạy;
+      // tra theo mã tin thì câu trả lời của Q1 vẫn trích Q1, không nhảy sang Q4.
+      // Gửi cả dãy vì Hermes lúc gộp chữ giữ mã tin đầu, lúc debounce lại ghi
+      // đè bằng mã tin cuối — sidecar trích tin sớm nhất còn neo.
       const quote = cmd.quote
-        || (cmd.auth?.cronJobId ? null : quoteForAsk(cmd.threadId, threadType, cmd.auth?.actorUid));
+        || (cmd.auth?.cronJobId
+          ? null
+          : quoteForAsk(cmd.threadId, threadType, cmd.auth?.actorUid, {
+            msgIds: cmd.auth?.msgIds,
+            msgId: cmd.auth?.msgId,
+          }));
       for (let i = 0; i < chunks.length; i++) {
         const item = chunks[i];
         const content = { msg: item.msg };

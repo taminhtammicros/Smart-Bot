@@ -11,13 +11,21 @@
  *
  * Hai tầng dùng chung tệp này:
  *   - bot-handler.js gọi `rememberQuestion` cho mỗi tin nhắn tới (người hỏi).
- *   - hermes-bridge.js gọi `quoteForAsk` khi gửi câu trả lời của CHÍNH người đó.
+ *   - hermes-bridge.js gọi `quoteForAsk` khi gửi câu trả lời của CHÍNH người đó,
+ *     kèm các tin đã khởi động lượt (`auth.msgIds` do adapter gắn).
  *
  * Neo sống tới khi chính người đó hỏi câu mới hoặc quá hạn, chứ không xoá sau
  * lần gửi đầu: một lượt trả lời của Hermes có thể đi qua nhiều lệnh `send`
  * (câu báo đang xử lý, từng đoạn của câu trả lời dài). Xoá sau lần gửi đầu thì
  * câu báo "đang xử lý" ăn mất trích dẫn và câu trả lời thật lại trôi nổi —
  * đúng thứ tệp này sinh ra để tránh.
+ *
+ * Khoá chính là **mã tin**, không phải người hỏi. Bot xếp hàng câu hỏi (xem
+ * `display.busy_input_mode: queue`), nên một người có thể đã gửi thêm ba câu
+ * trước khi câu đầu được trả lời; tra theo người thì câu trả lời của câu đầu
+ * sẽ trích dẫn câu thứ tư — sai luồng đúng lúc người đọc cần biết nhất. Tra
+ * theo người chỉ còn là đường lùi khi lượt không mang mã tin (cron, dashboard
+ * gửi tay, bản adapter cũ).
  *
  * Chỉ nhớ tin chữ. zca-js từ chối trích dẫn `webchat` khi nội dung không phải
  * chuỗi (`This kind of webchat quote type is not available`), và trích dẫn
@@ -31,7 +39,12 @@ const ANCHOR_TTL_MS = 30 * 60 * 1000;
 /** Số người đang chờ trả lời cùng lúc có hạn; giữ đủ rộng nhưng không phình vô hạn. */
 const MAX_ANCHORS = 500;
 
-/** Khoá theo hội thoại + người hỏi: hai người hỏi chen nhau trong một nhóm vẫn có neo riêng. */
+/** Khoá theo hội thoại + mã tin: câu Q1 vẫn còn neo khi Q2, Q3 của cùng người đã tới. */
+const byMsgId = new Map();
+const msgKeyOf = (threadId, threadType, msgId) =>
+  `${Number(threadType) === 1 ? 1 : 0}:${String(threadId ?? '')}:${String(msgId ?? '')}`;
+
+/** Khoá theo hội thoại + người hỏi (đường lùi khi lượt không mang mã tin). */
 const anchors = new Map();
 const keyOf = (threadId, threadType, askerUid) =>
   `${Number(threadType) === 1 ? 1 : 0}:${String(threadId ?? '')}:${String(askerUid ?? '')}`;
@@ -70,10 +83,8 @@ export function rememberQuestion(msg, now = Date.now()) {
   if (!msgId || !threadId || !uidFrom) return false;
 
   const threadType = Number(msg.type) === 1 ? 1 : 0;
-  const key = keyOf(threadId, threadType, uidFrom);
-  anchors.delete(key);
-  anchors.set(key, {
-    key,
+  const anchor = {
+    key: keyOf(threadId, threadType, uidFrom),
     threadId,
     threadType,
     askerUid: uidFrom,
@@ -85,8 +96,17 @@ export function rememberQuestion(msg, now = Date.now()) {
     msgType: quotable.msgType,
     ts: Number(msg?.data?.ts) || now,
     storedAt: now,
-  });
+  };
+  // Hai chỉ mục trên cùng một bản ghi: theo mã tin (đúng lượt) và theo người
+  // hỏi (đường lùi). Ghi đè chứ không xoá chéo — neo của Q2 không được làm
+  // mất neo của Q1, vì Q1 có thể vẫn đang chờ trong hàng đợi.
+  const mKey = msgKeyOf(threadId, threadType, msgId);
+  byMsgId.delete(mKey);
+  byMsgId.set(mKey, anchor);
+  anchors.delete(anchor.key);
+  anchors.set(anchor.key, anchor);
   while (anchors.size > MAX_ANCHORS) anchors.delete(anchors.keys().next().value);
+  while (byMsgId.size > MAX_ANCHORS) byMsgId.delete(byMsgId.keys().next().value);
   return true;
 }
 
@@ -94,12 +114,46 @@ export function rememberQuestion(msg, now = Date.now()) {
  * Khung trích dẫn (zca-js SendMessageQuote) cho câu trả lời của `askerUid`,
  * hoặc null khi người nhận không phải người vừa hỏi.
  *
- * Chỉ trả về neo khi đúng NGƯỜI đã hỏi: lịch gửi định kỳ, thông báo hệ thống
- * hay câu trả lời cho người khác không được kéo theo câu hỏi cũ của người
- * khác — trích dẫn sai người còn tệ hơn không trích dẫn.
+ * `msgIds` là các tin đã khởi động lượt này (adapter gắn vào `auth`), theo thứ
+ * tự tới; `msgId` đơn là dạng cũ. Tra neo của tin SỚM NHẤT còn neo — đường
+ * chính, vì người hỏi có thể đã gửi thêm câu mới trong lúc bot còn đang trả
+ * lời câu trước. Không neo nào tra được (sidecar vừa khởi động lại, neo đã quá
+ * hạn) thì **không trích dẫn**, tuyệt đối không lùi về câu mới nhất của người
+ * đó: trích sai câu còn tệ hơn không trích.
+ *
+ * Không có mã tin (cron, dashboard gửi tay, bản adapter cũ) thì lùi về neo theo
+ * người — như trước. Chỉ trả về neo khi đúng NGƯỜI đã hỏi: lịch gửi định kỳ,
+ * thông báo hệ thống hay câu trả lời cho người khác không được kéo theo câu
+ * hỏi cũ của người khác.
  */
-export function quoteForAsk(threadId, threadType, askerUid, now = Date.now()) {
+export function quoteForAsk(threadId, threadType, askerUid, { now = Date.now(), msgId = '', msgIds = [] } = {}) {
   const asker = String(askerUid ?? '');
+  // Adapter gửi cả cụm tin đã khởi động lượt; trích tin SỚM NHẤT còn neo. Hermes
+  // lúc gộp giữ mã tin đầu, lúc debounce lại ghi đè bằng mã tin cuối, nên dãy
+  // này là thứ duy nhất nói chắc câu nào mở đầu lượt. `msgId` đơn giữ cho bản
+  // adapter cũ và đường gọi một tin.
+  const askedIds = [
+    ...(Array.isArray(msgIds) ? msgIds : []),
+    msgId,
+  ].map((id) => String(id ?? '')).filter(Boolean);
+  if (askedIds.length) {
+    // Theo thứ tự tin tới, không theo thứ tự mảng: người gọi đã giữ thứ tự,
+    // nhưng adapter cũ có thể gửi mỗi mã tin cuối.
+    for (const id of askedIds) {
+      const exact = byMsgId.get(msgKeyOf(threadId, threadType, id));
+      if (!exact) continue;
+      if (now - exact.storedAt > ANCHOR_TTL_MS) {
+        byMsgId.delete(msgKeyOf(threadId, threadType, id));
+        continue;
+      }
+      // Người gửi phải khớp: mã tin của người khác không được kéo theo.
+      if (asker && exact.askerUid !== asker) continue;
+      return quoteOf(exact);
+    }
+    // Có mã tin mà không neo nào tra được (sidecar vừa khởi động lại, neo đã
+    // quá hạn) thì KHÔNG trích: trích nhầm câu còn tệ hơn không trích.
+    return null;
+  }
   if (!asker) return null;
   const anchor = anchors.get(keyOf(threadId, threadType, asker));
   if (!anchor) return null;
@@ -107,6 +161,10 @@ export function quoteForAsk(threadId, threadType, askerUid, now = Date.now()) {
     anchors.delete(anchor.key);
     return null;
   }
+  return quoteOf(anchor);
+}
+
+function quoteOf(anchor) {
   return {
     content: anchor.text,
     msgType: anchor.msgType,
@@ -124,4 +182,5 @@ export function quoteForAsk(threadId, threadType, askerUid, now = Date.now()) {
 /** Quên hết neo (dừng listener, đổi tài khoản) — neo cũ không được dính sang phiên mới. */
 export function forgetQuestions() {
   anchors.clear();
+  byMsgId.clear();
 }
