@@ -9,12 +9,14 @@ export const SETTINGS_ENV_KEYS = [
   'ZALO_GROUP_REPLY_ONLY_TAGGED', 'ZALO_DM_POLICY', 'ZALO_FLOOD_THRESHOLD', 'ZALO_FLOOD_WINDOW_S', 'ZALO_FLOOD_MUTE_S',
   'ZALO_ACK_GESTURES', 'ZALO_NOTIFY_OWNER_MENTION', 'ZALO_AUTO_REACT', 'ZALO_FRIEND_TOOLS', 'ZALO_OWNER_ONLY_GROUPS', 'ZALO_CONFIRM_DANGEROUS',
   'ZALO_HISTORY_RETENTION_DAYS', 'ZALO_KB_PUBLIC_DIRS', 'ZALO_PUBLIC_MCP', 'ZALO_MEDIA_LOOKBACK',
+  'ZALO_SOUL_REMINDER',
 ];
 export const EDITABLE_KEYS = new Set(['ZALO_ALLOWED_USERS', 'ZALO_KB_DIR', ...SETTINGS_ENV_KEYS]);
 // Giá trị ghi được: UID chủ nhân chỉ chữ số + dấu phẩy; khoá Cấu hình: chữ (cả có dấu), số, khoảng trắng, _ . , * ? : / -
 // — không bao giờ có nháy, \, xuống dòng, # hay = nên không chèn được dòng/khoá khác.
 // ZALO_KB_DIR (Kho tri thức › Sửa nguồn): đường dẫn ghi bằng "/" — không \, nháy, #, = (lib/kb-store.js kiểm thư mục).
-const VALUE_RULES = { ZALO_ALLOWED_USERS: /^[0-9,]*$/, ZALO_KB_DIR: /^[\p{L}\p{N} _.,:/()&+-]{1,400}$/u };
+// ZALO_SOUL_REMINDER (Cấu hình › Nhắc PS): chuỗi nhắc ≤ 500 ký tự, một dòng — không dấu xuống dòng, \, nháy kép, = để an toàn .env.
+const VALUE_RULES = { ZALO_ALLOWED_USERS: /^[0-9,]*$/, ZALO_KB_DIR: /^[\p{L}\p{N} _.,:/()&+-]{1,400}$/u, ZALO_SOUL_REMINDER: /^[^\n\r"\\]{0,500}$/u };
 const SETTING_VALUE = /^[\p{L}\p{N} _.,*?:/-]*$/u;
 const BARE_VALUE = /^[A-Za-z0-9_.,*?:/-]*$/;
 // Chỉ đọc, chỉ dùng phía máy chủ (giai đoạn 7): nơi đặt sổ người quen/kho tài liệu, địa chỉ bộ nhớ dài hạn.

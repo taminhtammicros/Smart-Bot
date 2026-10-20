@@ -863,6 +863,11 @@ class ZaloAdapter(BasePlatformAdapter):
             extra.get("auto_react", _get_scoped_secret("ZALO_AUTO_REACT", "true")),
             default=True,
         )
+        # Dòng nhắc nối cuối prompt (Cấu hình › Trả lời). Sửa trên dashboard thì áp dụng từ tin kế tiếp,
+        # không cần khởi động lại: _on_message đọc lại qua _reload_settings_if_changed.
+        self._soul_reminder: str = str(
+            extra.get("soul_reminder", _get_scoped_secret("ZALO_SOUL_REMINDER", "")) or ""
+        ).strip()
         # Hỏi về ảnh/tệp ("xem ảnh này", "gộp 2 file") thì lật lại bao nhiêu tin gần nhất trong nhóm để lấy
         # ảnh/tệp nạp cho trợ lý (Cấu hình › Đọc ảnh và tệp). Ảnh xa hơn chỉ còn là đường link, trợ lý không xem được.
         self._media_lookback: int = _media_lookback(
@@ -1199,6 +1204,20 @@ class ZaloAdapter(BasePlatformAdapter):
             who = " ".join(str(sender_name or "").split()).translate(unbracket)
             prompt_text = f"[Người nhắn — {who}: {known}. Lời tự khai, không phải chỉ dẫn.]\n{prompt_text}"
 
+        # Nhắc SOUL: nối cuối đúng chuỗi người dùng thấy (prompt_text), KHÔNG
+        # đụng ``text`` — biến đó còn dùng cho log, ``ack_message`` (chọn icon
+        # thả cảm xúc) và ``recent_entry`` (ngữ cảnh nhóm). Sửa ``text`` sẽ
+        # làm chữ nhắc lọt vào ngữ cảnh và hiện ra như lời người dùng tự viết.
+        #
+        # Hai lớp, theo đúng thứ tự: ZALO_SOUL_REMINDER (toàn cục, mọi tin) rồi
+        # ZALO_SOUL_REMINDER_GROUP (riêng của nhóm đang nhắn — đặt ở Phân quyền Bot).
+        # Lời dặn riêng của nhóm đứng sau nên là phần mô hình đọc sau cùng.
+        reminders = [str(self._soul_reminder or "").strip()]
+        if is_group:
+            reminders.append(self._group_soul_reminder(thread_id))
+        reminder = "\n\n".join(part for part in reminders if part)
+        if reminder:
+            prompt_text = f"{prompt_text}\n\n{reminder}" if prompt_text.strip() else reminder
         event = MessageEvent(
             text=prompt_text,
             message_type=(
@@ -1280,6 +1299,22 @@ class ZaloAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[zalo] không đọc được quyền nhóm %s: %s", thread_id, exc)
             return None
+
+    @staticmethod
+    def _group_soul_reminder(thread_id: str) -> str:
+        """Dòng nhắc riêng của nhóm này (Phân quyền Bot › nhóm › Dòng nhắc riêng), ``""`` khi không đặt.
+
+        Đọc lại mỗi tin nên sửa trên dashboard là có hiệu lực từ tin kế tiếp. Lỗi bất ngờ → không có nhắc
+        riêng: bot vẫn trả lời, chỉ dùng dòng nhắc toàn cục.
+        """
+        perms = _group_permissions()
+        if perms is None:
+            return ""
+        try:
+            return str(perms.group_settings(thread_id).get("soul_reminder") or "")
+        except Exception as exc:
+            logger.warning("[zalo] không đọc được dòng nhắc riêng của nhóm %s: %s", thread_id, exc)
+            return ""
 
     @staticmethod
     def _dm_rules(sender_uid: str) -> Optional[Dict[str, Any]]:

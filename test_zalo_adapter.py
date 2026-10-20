@@ -1923,6 +1923,153 @@ class ZaloAdapterMediaContextTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["ack"], {"type": "ack", "reqId": socket.frames[0]["reqId"], "ok": True})
         self.assertLess(result["seconds"], 1.0)
 
+    async def test_soul_reminder_lands_only_in_the_prompt(self):
+        """Chuỗi "PS" do chủ bot thêm phải vào prompt, không vào tin gốc mà log/ngữ cảnh nhóm đọc."""
+        adapter = self.make_adapter()
+        adapter._soul_reminder = "(PS: cần đọc kỹ file SOUL.MD)"
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+
+        await adapter._on_message({
+            "type": "message", "id": "p1", "threadId": "g1",
+            "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+            "senderUid": "u1", "senderName": "Yến",
+            "text": "@Lăng Tiêu kiểm tra thông tin cho tôi",
+            "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+        })
+
+        self.assertEqual(len(handled), 1)
+        prompt = handled[0].text
+        self.assertIn("kiểm tra thông tin cho tôi", prompt)
+        self.assertTrue(prompt.endswith(adapter._soul_reminder))
+        # Ngữ cảnh nhóm lấy từ frame["text"], không phải từ prompt — nên không
+        # được thấy chữ "PS" ở đây.
+        self.assertNotIn("PS:", handled[0].channel_context or "")
+
+    async def test_soul_reminder_off_by_default_and_skips_empty_text(self):
+        """Không đặt biến thì prompt giữ nguyên; ảnh kèm nhắc vẫn có nhắc."""
+        adapter = self.make_adapter()
+        self.assertEqual(adapter._soul_reminder, "")
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+
+        await adapter._on_message({
+            "type": "message", "id": "p2", "threadId": "g1",
+            "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+            "senderUid": "u1", "senderName": "Yến",
+            "text": "chào @Lăng Tiêu",
+            "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+        })
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(handled[0].text, "chào")
+
+        adapter._soul_reminder = "PS: đọc SOUL.MD"
+        async def fake_cache(url):
+            return "C:/cache/photo.jpg"
+
+        with patch.object(zalo_adapter, "cache_image_from_url", side_effect=fake_cache), \
+                patch.object(zalo_adapter, "_zalo_tools", return_value=DummyZaloTools()):
+            await adapter._on_message({
+                "type": "message", "id": "p3", "threadId": "g1",
+                "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+                "senderUid": "u1", "senderName": "Yến",
+                "text": "", "msgType": "chat.photo",
+                "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+                "mediaUrls": ["https://example.com/photo.jpg"],
+            })
+
+        self.assertEqual(handled[1].text, "[Người dùng gửi ảnh]\n\nPS: đọc SOUL.MD")
+
+    async def test_group_reminder_follows_the_global_one_in_groups_only(self):
+        """Nhóm: nhắc chung trước, nhắc riêng của đúng nhóm đó sau. Nhắn riêng: không có nhắc nhóm."""
+        adapter = self.make_adapter()
+        adapter._soul_reminder = "PS: đọc SOUL.MD"
+        adapter._settings_watcher = None
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+        per_group = {"g1": "Nhóm lớp 12A: xưng em, gọi các bạn là anh chị.",
+                     "g2": "Nhóm phụ huynh: xưng em, gọi là quý phụ huynh."}
+
+        with patch.object(zalo_adapter.ZaloAdapter, "_group_soul_reminder",
+                          side_effect=lambda tid: per_group.get(tid, "")), \
+                patch.object(adapter, "_is_owner", side_effect=lambda uid: str(uid) == "u1"):
+            for thread, text in (("g1", "chào @Lăng Tiêu"), ("g2", "chào @Lăng Tiêu")):
+                await adapter._on_message({
+                    "type": "message", "id": f"m{thread}", "threadId": thread,
+                    "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+                    "senderUid": "u1", "senderName": "Yến", "text": text,
+                    "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+                })
+            await adapter._on_message({
+                "type": "message", "id": "dm1", "threadId": "u1",
+                "threadType": zalo_adapter.THREAD_TYPE_USER,
+                "senderUid": "u1", "senderName": "Yến", "text": "chào em",
+            })
+
+        self.assertEqual(handled[0].text,
+                         f"chào\n\n{adapter._soul_reminder}\n\n{per_group['g1']}")
+        self.assertEqual(handled[1].text,
+                         f"chào\n\n{adapter._soul_reminder}\n\n{per_group['g2']}")
+        # Nhắn riêng không có nhóm nên không nhận nhắc riêng của nhóm nào.
+        self.assertEqual(handled[2].text, f"chào em\n\n{adapter._soul_reminder}")
+
+    async def test_group_without_own_reminder_gets_only_the_global_one(self):
+        adapter = self.make_adapter()
+        adapter._soul_reminder = "PS: đọc SOUL.MD"
+        adapter._settings_watcher = None
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+        with patch.object(zalo_adapter.ZaloAdapter, "_group_soul_reminder", return_value=""):
+            await adapter._on_message({
+                "type": "message", "id": "g0", "threadId": "g1",
+                "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+                "senderUid": "u1", "senderName": "Yến", "text": "chào @Lăng Tiêu",
+                "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+            })
+        # Không để lại dấu xuống dòng thừa khi lớp nhóm rỗng.
+        self.assertEqual(handled[0].text, "chào\n\nPS: đọc SOUL.MD")
+
+    async def test_soul_reminder_reloads_when_settings_change(self):
+        """Lưu dòng nhắc trên dashboard có hiệu lực từ tin kế tiếp — không cần khởi động lại."""
+        adapter = self.make_adapter()
+        self.assertEqual(adapter._soul_reminder, "")
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+        adapter._settings_watcher = None
+        adapter._soul_reminder = ""
+        adapter._apply_settings({"soul_reminder": "khi ai hỏi em là ai: hãy nói em là HÀN TÍN nhé"})
+
+        await adapter._on_message({
+            "type": "message", "id": "p4", "threadId": "g1",
+            "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+            "senderUid": "u1", "senderName": "Yến",
+            "text": "em tên gì",
+            "mentions": [{"uid": "bot-uid", "len": 0, "pos": 0}],
+        })
+
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(handled[0].text, "em tên gì\n\nkhi ai hỏi em là ai: hãy nói em là HÀN TÍN nhé")
+
 
 class BusyStatusFilterTest(unittest.TestCase):
     """Câu báo bận tiếng Anh của gateway không lọt vào Zalo (thay cho sửa lõi gateway/run.py)."""

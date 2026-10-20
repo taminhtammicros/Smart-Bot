@@ -173,7 +173,12 @@ export function makeDmEnv({ envFile, configFile, inherited = {} }) {
   };
 }
 
-/** Một lớp: chỉ giữ khoá biết và đúng kiểu — giống `_layer` bên Python (9 nút + 4 nút xưởng + hạn mức xưởng). */
+/** Dòng nhắc riêng của nhóm: một dòng, ≤ MAX_SOUL ký tự — giống `_soul` bên Python. */
+export const MAX_SOUL = 1000;
+// eslint-disable-next-line no-control-regex
+const tidySoul = (v) => (typeof v === 'string' ? v.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').replace(/\s+/g, ' ').trim().slice(0, MAX_SOUL) : '');
+
+/** Một lớp: chỉ giữ khoá biết và đúng kiểu — giống `_layer` bên Python (9 nút + 4 nút xưởng + hạn mức xưởng + nhắc riêng). */
 function layer(raw) {
   if (!isObj(raw)) return {};
   const out = {};
@@ -181,6 +186,8 @@ function layer(raw) {
   const features = pickBools(raw.features, [...FEATURE_KEYS, ...STUDIO_KEYS]);
   if (Object.keys(features).length) out.features = features;
   for (const k of QUOTA_KEYS) if (isQuota(raw[k])) out[k] = raw[k];
+  const soul = tidySoul(raw.soulReminder);
+  if (soul) out.soulReminder = soul;
   return out;
 }
 
@@ -242,7 +249,10 @@ export function normalize(raw) {
   // Mục `tools` (giai đoạn 7B, spec §18.6): công cụ tắt riêng với người không phải chủ nhân — cũng phải sống qua mọi lần lưu.
   const tools = normalizeTools(raw.tools);
   const folders = normalizeFolders(raw.folders);
-  return { version: 1, defaults: layer(raw.defaults), groups, ...(Object.keys(folders).length ? { folders } : {}),
+  // Lớp `defaults` không giữ `soulReminder`: lời nhắc toàn cục là ZALO_SOUL_REMINDER (trang Cấu hình), còn lời nhắc
+  // riêng thuộc về từng nhóm/thư mục. Ghi nó vào đây sẽ thành nguồn sự thật thứ hai cho cùng một việc.
+  const { soulReminder: _soul, ...defaults } = layer(raw.defaults);
+  return { version: 1, defaults, groups, ...(Object.keys(folders).length ? { folders } : {}),
     ...(dm ? { dm } : {}), ...(studio ? { studio } : {}), ...(tools ? { tools } : {}) };
 }
 
@@ -381,7 +391,14 @@ function parseSettings9(body) {
   if (!isObj(f) || Object.keys(f).some((k) => !FEATURE_KEYS.includes(k)) || FEATURE_KEYS.some((k) => typeof f[k] !== 'boolean')) {
     throw new InvalidPermissions('Danh sách tính năng không hợp lệ — tải lại trang rồi thử lại.');
   }
-  return { active: body.active, replyOnlyTagged: body.replyOnlyTagged, features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, f[k]])) };
+  const out = { active: body.active, replyOnlyTagged: body.replyOnlyTagged, features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, f[k]])) };
+  // Lời nhắc riêng: không gửi = giữ nguyên; gửi chuỗi rỗng = bỏ lời nhắc riêng.
+  if (body.soulReminder !== undefined) {
+    if (typeof body.soulReminder !== 'string') throw new InvalidPermissions('Dòng nhắc riêng phải là chữ — tải lại trang rồi thử lại.');
+    if (body.soulReminder.trim().length > MAX_SOUL) throw new InvalidPermissions(`Dòng nhắc riêng dài quá ${MAX_SOUL} ký tự — rút gọn bớt.`);
+    out.soulReminder = tidySoul(body.soulReminder);
+  }
+  return out;
 }
 
 /**
@@ -393,12 +410,18 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
   const globalFlag = () => (typeof globalReplyOnlyTagged === 'function' ? globalReplyOnlyTagged() : globalReplyOnlyTagged);
   const builtin = () => ({ active: true, replyOnlyTagged: globalFlag(), features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, true])), studio: studioOff() });
   // Trong tệp, nút xưởng nằm chung `features`; ở giao diện tách ra `studio` (thiếu khoá = tắt).
-  const merge = (base, l) => ({
-    active: l.active ?? base.active,
-    replyOnlyTagged: l.replyOnlyTagged ?? base.replyOnlyTagged,
-    features: { ...base.features, ...pickBools(l.features, FEATURE_KEYS) },
-    studio: { ...base.studio, ...pickBools(l.features, STUDIO_KEYS) },
-  });
+  const merge = (base, l) => {
+    const out = {
+      active: l.active ?? base.active,
+      replyOnlyTagged: l.replyOnlyTagged ?? base.replyOnlyTagged,
+      features: { ...base.features, ...pickBools(l.features, FEATURE_KEYS) },
+      studio: { ...base.studio, ...pickBools(l.features, STUDIO_KEYS) },
+    };
+    // Lời nhắc riêng chỉ xuất hiện khi có: lớp nền không mang khoá này (toàn cục là ZALO_SOUL_REMINDER).
+    const soul = l.soulReminder ?? base.soulReminder;
+    if (soul) out.soulReminder = soul;
+    return out;
+  };
 
   /** `{ data, exists, corrupt }` — tệp hỏng thì data rỗng (bot cũng đang dùng mặc định), không đổi tên tệp. */
   function read() {
@@ -489,7 +512,13 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
       const quota = settings[k] === undefined ? prev[k] ?? null : settings[k];
       if (quota !== null && quota !== base[k]) entry[k] = quota;
     }
-    const changed = [...SWITCHES.filter((k) => settings[k] !== base[k]), ...Object.keys(features), ...QUOTA_KEYS.filter((k) => k in entry)];
+    // Lời nhắc riêng: chỉ ghi khi khác nền; để trống (hoặc bằng nền) = theo thư mục, không có thì thôi.
+    // `changed` so với mục đã lưu để lần xoá lời nhắc riêng cũng được báo là có thay đổi.
+    const soul = tidySoul(settings.soulReminder ?? '');
+    if (soul && soul !== (base.soulReminder || '')) entry.soulReminder = soul;
+    const soulChanged = soul !== tidySoul(prev.soulReminder ?? '');
+    const changed = [...SWITCHES.filter((k) => settings[k] !== base[k]), ...Object.keys(features), ...QUOTA_KEYS.filter((k) => k in entry),
+      ...(soulChanged ? ['soulReminder'] : [])];
     return { entry, changed };
   };
 

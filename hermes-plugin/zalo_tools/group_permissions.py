@@ -128,6 +128,20 @@ def _quota(value: Any) -> Optional[int]:
     return None
 
 
+SOUL_REMINDER_MAX = 1000
+_SOUL_KEEP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _soul(value: Any) -> str:
+    """Dòng nhắc riêng của nhóm (``soulReminder``): chuỗi một dòng, bỏ ký tự điều khiển, tối đa 1000 ký tự.
+
+    Ghi một dòng để không phá ``.env``/``config.yaml`` khi chép qua lại; nhiều ý thì ngăn bằng dấu chấm.
+    """
+    if not isinstance(value, str):
+        return ""
+    return " ".join(_SOUL_KEEP.sub("", value).split())[:SOUL_REMINDER_MAX]
+
+
 def _layer(raw: Any) -> Dict[str, Any]:
     """Một lớp (defaults hoặc một nhóm): chỉ giữ khoá hợp lệ, đúng kiểu bool."""
     if not isinstance(raw, dict):
@@ -143,6 +157,9 @@ def _layer(raw: Any) -> Dict[str, Any]:
         quota = _quota(raw.get(key))
         if quota is not None:
             out[key] = quota
+    soul = _soul(raw.get("soulReminder"))
+    if soul:
+        out["soulReminder"] = soul
     return out
 
 
@@ -292,7 +309,10 @@ def _load() -> Dict[str, Any]:
 
 
 def group_settings(group_id: str) -> Dict[str, Any]:
-    """Quyền đã gộp của một nhóm: ``{active, reply_only_tagged, features, custom}``.
+    """Quyền đã gộp của một nhóm: ``{active, reply_only_tagged, features, soul_reminder, custom}``.
+
+    ``soul_reminder``: dòng nhắc riêng của nhóm (``ZALO_SOUL_REMINDER_GROUP``), ``""`` khi không đặt — adapter khi
+    đó chỉ dùng ``ZALO_SOUL_REMINDER`` toàn cục.
 
     ``custom``: nhóm có mục riêng trong tệp hoặc nằm trong một thư mục — phân quyền đã chọn này thắng danh sách
     cũ ``owner_only_groups``.
@@ -307,7 +327,24 @@ def group_settings(group_id: str) -> Dict[str, Any]:
     active = entry.get("active", folder.get("active", defaults.get("active", True)))
     reply = entry.get("replyOnlyTagged", folder.get("replyOnlyTagged", defaults.get("replyOnlyTagged")))
     return {"active": active, "reply_only_tagged": reply, "features": features,
+            "soul_reminder": group_soul_reminder(group_id),
             "custom": bool(entry) or str(group_id or "") in (data.get("folder_of") or {})}
+
+
+def group_soul_reminder(group_id: str) -> str:
+    """Dòng nhắc riêng của nhóm đang hiệu lực (``""`` = không đặt ở lớp nào).
+
+    Lớp gộp: ``groups[id].soulReminder`` ← ``folders[fid].soulReminder``. Nhóm đặt riêng thì thắng thư mục; thư mục
+    đặt thì mọi nhóm trong thư mục dùng chung, từng nhóm vẫn ghi đè được. ``defaults`` không tham gia — lớp toàn cục
+    là ``ZALO_SOUL_REMINDER`` của adapter, luôn nối trước lớp này.
+    """
+    data = _load()
+    for layer in ((data.get("groups") or {}).get(str(group_id or "")) or {},
+                  _folder_layer(data, group_id)):
+        soul = layer.get("soulReminder")
+        if soul:
+            return str(soul)
+    return ""
 
 
 def _folder_layer(data: Dict[str, Any], group_id: str) -> Dict[str, Any]:

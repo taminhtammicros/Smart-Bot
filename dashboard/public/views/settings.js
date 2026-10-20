@@ -32,9 +32,12 @@ function Field({ s, value, onChange }) {
   if (s.type === 'bool') return html`<${Toggle} id=${id} checked=${value} onChange=${onChange} label=${s.label} hint=${note} />`;
   if (s.type === 'enum') return html`<div class="field"><label for=${id}>${s.label}</label>
     <select id=${id} value=${value} onChange=${(e) => onChange(e.currentTarget.value)}>${s.options.map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}</select>${note}</div>`;
+  if (s.type === 'text') return html`<div class="field"><label for=${id}>${s.label}</label>
+    <textarea id=${id} rows="3" maxlength=${s.max || 500} value=${value ?? ''} onInput=${(e) => onChange(e.currentTarget.value)}></textarea>${note}</div>`;
   const text = Array.isArray(value) ? value.join(', ') : Number.isNaN(value) ? '' : String(value);
+  // onInput: Preact gắn onChange thành DOM "change" (chỉ bắn khi blur) — poll 3 s của Shell sẽ trả giá trị cũ vào ô.
   return html`<div class="field"><label for=${id}>${s.label}${s.type === 'int' ? ` (${s.min}–${s.max})` : ''}</label>
-    <input id=${id} inputmode=${s.type === 'int' ? 'numeric' : undefined} value=${text} onChange=${(e) => onChange(parseInput(s, e.currentTarget.value))} />${note}</div>`;
+    <input id=${id} inputmode=${s.type === 'int' ? 'numeric' : undefined} value=${text} onInput=${(e) => onChange(parseInput(s, e.currentTarget.value))} />${note}</div>`;
 }
 
 /** Ghép kết quả lưu nhiều nhóm (`[{ id, ...cấu hình }]`) vào danh sách đang hiện; nhóm vừa lưu hết "chưa lưu". */
@@ -130,7 +133,7 @@ export function Settings() {
   return html`${head}<${RestartBanner} version=${version} />
     <form class="card settings-form" onSubmit=${save} novalidate>
       ${groups.map((g) => html`<fieldset key=${g} class="mem-block"><legend><h3>${g}</h3></legend>
-        ${list.filter((s) => s.group === g).map((s) => html`<${Field} key=${s.id} s=${s} value=${draft[s.id]} onChange=${(v) => setDraft({ ...draft, [s.id]: v })} />`)}
+        ${list.filter((s) => s.group === g).map((s) => html`<${Field} key=${s.id} s=${s} value=${draft[s.id]} onChange=${(v) => setDraft((d) => ({ ...d, [s.id]: v }))} />`)}
       </fieldset>`)}
       <${SaveBar} count=${count} busy=${busy} canSave=${count > 0} onUndo=${() => take({ settings: list })} msg=${msg} />
     </form>

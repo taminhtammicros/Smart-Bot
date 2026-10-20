@@ -374,3 +374,41 @@ test('parseGroupsPatch: đòi danh sách mã nhóm hợp lệ (tối đa 500, b�
     { ids: ['200'], patch: { features: { web: 1 } } }, { ids: ['200'], patch: { studio: { web: true } } }, { ids: ['200'], patch: { studioQuota: 3 } },
   ]) assert.throws(() => parseGroupsPatch(bad), InvalidPermissions, JSON.stringify(bad)?.slice(0, 60));
 });
+
+test('nhắc riêng: mỗi nhóm một câu, ghi khác biệt so với thư mục, xoá được, không rơi vào defaults', (t) => {
+  const s = setup(t);
+  const { setFolderMembers, createFolder } = s.store;
+  const { id: fid } = createFolder('Lớp');
+  setFolderMembers(fid, [G]);
+  const A = '2054797107487294001';
+  const B = '2054797107487294002';
+
+  // Nhóm đặt câu của riêng mình → ghi vào mục nhóm, không đụng lớp thư mục.
+  s.store.setGroup(A, settings({ soulReminder: 'Lớp 12A: xưng em, gọi các bạn là anh chị.' }), '12A');
+  // Nhóm khác không đặt → không có câu nào, cũng không mượn câu của nhóm A.
+  s.store.setGroup(B, settings({ active: false }), '12B');
+  const groupA = s.store.get().groups[A];
+  const groupB = s.store.get().groups[B];
+  assert.equal(s.disk().groups[A].soulReminder, 'Lớp 12A: xưng em, gọi các bạn là anh chị.');
+  assert.equal(s.disk().groups[B].soulReminder, undefined);
+  assert.equal(groupA.soulReminder, 'Lớp 12A: xưng em, gọi các bạn là anh chị.');
+  assert.equal(groupB.soulReminder, undefined, 'nhóm chưa đặt không được mượn câu của nhóm khác');
+  // Lời nhắc toàn cục nằm ở Cấu hình (ZALO_SOUL_REMINDER), không bao giờ đi vào defaults của tệp này.
+  assert.equal('soulReminder' in s.disk().defaults, false);
+
+  // Để trống = bỏ câu riêng của nhóm.
+  s.store.setGroup(A, settings(), '12A');
+  assert.equal(s.disk().groups[A]?.soulReminder, undefined);
+});
+
+test('nhắc riêng: chuẩn hoá một dòng, cắt 1000 ký tự, từ chối kiểu sai', (t) => {
+  const s = setup(t);
+  s.store.setGroup(G, settings({ soulReminder: '  một\nhai   ba  ' }), 'Tổ');
+  assert.equal(s.disk().groups[G].soulReminder, 'một hai ba');
+  s.store.setGroup(G, settings({ soulReminder: 'x'.repeat(1200) }), 'Tổ');
+  assert.equal(s.disk().groups[G].soulReminder.length, 1000);
+  assert.throws(() => parseSettings({ ...settings(), soulReminder: 42 }), InvalidPermissions);
+  assert.throws(() => parseSettings({ ...settings(), soulReminder: 'x'.repeat(1001) }), InvalidPermissions);
+  // Không gửi khoá = giữ nguyên câu đang có (bản giao diện cũ vẫn lưu được nhóm).
+  assert.equal('soulReminder' in parseSettings(settings()), false);
+});

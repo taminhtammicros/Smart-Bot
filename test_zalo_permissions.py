@@ -241,6 +241,39 @@ class FolderRulesTest(PermissionsFile, unittest.TestCase):
         self.assertIn("Quy tắc mới.", self.hook(GROUP_A, True, OWNER)["context"])
 
 
+class GroupSoulReminderTest(PermissionsFile, unittest.TestCase):
+    """Dòng nhắc riêng của nhóm: khác nhau theo từng mã nhóm, nối sau dòng nhắc toàn cục."""
+
+    def test_each_group_gets_its_own_reminder(self):
+        self.write({"version": 1,
+                    "groups": {GROUP_A: {"soulReminder": "Nhóm lớp 12A: xưng em, gọi các bạn là anh chị."},
+                               GROUP_B: {"soulReminder": "Nhóm phụ huynh: xưng em, gọi là quý phụ huynh."}}})
+        self.assertIn("12A", gp.group_soul_reminder(GROUP_A))
+        self.assertIn("phụ huynh", gp.group_soul_reminder(GROUP_B))
+        self.assertEqual(gp.group_settings(GROUP_A)["soul_reminder"], gp.group_soul_reminder(GROUP_A))
+
+    def test_group_without_reminder_has_none(self):
+        self.write({"version": 1, "groups": {GROUP_A: {"soulReminder": "chỉ nhóm A"}}})
+        self.assertEqual(gp.group_soul_reminder(GROUP_B), "")
+        # `defaults` không phải lớp của lời nhắc riêng: toàn cục nằm ở ZALO_SOUL_REMINDER của adapter.
+        self.write({"version": 1, "defaults": {"soulReminder": "áp cho mọi nhóm"}, "groups": {}})
+        self.assertEqual(gp.group_soul_reminder(GROUP_B), "")
+
+    def test_group_overrides_its_folder(self):
+        self.write({"version": 1, "folders": {"lop": {"name": "Lớp", "groups": [GROUP_A, GROUP_B],
+                                                       "soulReminder": "Quy ước chung của khối lớp."}},
+                    "groups": {GROUP_A: {"soulReminder": "Riêng lớp 12A."}}})
+        self.assertEqual(gp.group_soul_reminder(GROUP_A), "Riêng lớp 12A.")
+        self.assertEqual(gp.group_soul_reminder(GROUP_B), "Quy ước chung của khối lớp.")
+
+    def test_reminder_is_normalised_to_one_capped_line(self):
+        self.write({"version": 1, "groups": {GROUP_A: {"soulReminder": "  dòng\nmột\x07   dòng hai " + "x" * 2000}}})
+        soul = gp.group_soul_reminder(GROUP_A)
+        self.assertNotIn("\n", soul)
+        self.assertNotIn("\x07", soul)
+        self.assertLessEqual(len(soul), gp.SOUL_REMINDER_MAX)
+
+
 class BomTest(PermissionsFile, unittest.TestCase):
     def test_hand_edited_file_with_bom_is_read(self):
         with open(self.path, "w", encoding="utf-8-sig") as fh:

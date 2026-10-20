@@ -493,6 +493,21 @@ test('xưởng: ô số lượt, gửi nút xưởng chỉ khi đủ khoá, đ�
   assert.equal(sameSettings({ ...base, studioQuota: undefined }, base), true, 'thiếu số lượt = theo mặc định');
 });
 
+test('lời nhắc riêng: gửi khi có câu, xoá khi chủ động xoá, im lặng khi chưa từng đặt', async () => {
+  const { settingsPayload } = await import('./views/permissions.js');
+  const base = { active: true, replyOnlyTagged: true, features: { web: true }, studio: S_OFF, studioQuota: null };
+  const set = { isGroup: true, studioFeatures: SF };
+  // Nhóm có câu: gửi nguyên văn, cắt khoảng trắng thừa.
+  assert.equal(settingsPayload({ ...base, soulReminder: '  Lớp 12A: xưng em.  ' }, set).soulReminder, 'Lớp 12A: xưng em.');
+  // Chưa từng đặt: không gửi khoá, để diffLayer coi nhóm vẫn đang theo nền.
+  assert.equal('soulReminder' in settingsPayload({ ...base }, set), false);
+  assert.equal('soulReminder' in settingsPayload({ ...base }, { ...set, previous: { soulReminder: '' } }), false);
+  // Chủ động xoá: gửi chuỗi rỗng, vì vắng mặt nghĩa là giữ nguyên.
+  assert.equal(settingsPayload({ ...base, soulReminder: '' }, { ...set, previous: { soulReminder: 'câu cũ' } }).soulReminder, '');
+  // Mặc định (không phải nhóm) không bao giờ gửi: lời nhắc toàn cục nằm ở trang Cấu hình.
+  assert.equal('soulReminder' in settingsPayload({ ...base, soulReminder: 'abc' }, { isGroup: false, studioFeatures: SF }), false);
+});
+
 test('xưởng: máy Windows khoá nút video (chính sách cài đặt), máy khác không', async () => {
   const { lockedByPolicy, quotaSummary } = await import('./views/studio-box.js');
   assert.equal(quotaSummary('', 3), '3 lượt/người/ngày (mặc định)');

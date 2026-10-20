@@ -23,6 +23,7 @@ export const SETTINGS = [
   { id: 'notifyOwnerMention', group: 'Trả lời', label: 'Báo về tin riêng khi có người tag chủ nhân trong nhóm', hint: 'Bot nhắn riêng cho chủ nhân: ai tag, ở nhóm nào, lúc nào, nội dung gì. Nhiều bot cùng ở một nhóm thì chỉ bật ở một bot để khỏi báo trùng.', type: 'bool', env: 'ZALO_NOTIFY_OWNER_MENTION', def: true, restart: NOW },
   { id: 'autoReact', group: 'Trả lời', label: 'Thả cảm xúc tự động', type: 'bool', env: 'ZALO_AUTO_REACT', extra: 'auto_react', extraWins: true, def: true, restart: NOW },
   { id: 'ownerOnlyGroups', group: 'Trả lời', label: 'Nhóm chỉ chủ nhân gọi được bot', hint: 'Người khác tag bot thì bot im, tin vẫn được lưu làm ngữ cảnh. Nên chỉnh ở Phân quyền Bot (tắt nhóm) — nhóm đã phân quyền riêng ở đó thì phân quyền đó thắng danh sách này.', type: 'ids', max: 50, env: 'ZALO_OWNER_ONLY_GROUPS', extra: 'owner_only_groups', extraWins: true, def: [], restart: NOW },
+  { id: 'soulReminder', group: 'Trả lời', label: 'Dòng nhắc PS tự động nối cuối mọi tin', hint: 'Chỉ vào prompt cho mô hình xử lý — không vào log, ngữ cảnh nhóm hay lịch sử. Để trống = tắt. Ví dụ: "PS: cần đọc kỹ file SOUL.MD trước khi suy nghĩ các câu trả lời".', type: 'text', max: 500, env: 'ZALO_SOUL_REMINDER', extra: 'soul_reminder', extraWins: true, def: '', restart: NOW },
   { id: 'floodThreshold', group: 'Chống nhắn dồn', label: 'Số tin tối đa trong một khoảng', type: 'int', min: 2, max: 50, env: 'ZALO_FLOOD_THRESHOLD', def: 6, restart: NOW },
   { id: 'floodWindow', group: 'Chống nhắn dồn', label: 'Khoảng tính (giây)', type: 'int', min: 5, max: 600, env: 'ZALO_FLOOD_WINDOW_S', decimal: true, def: 15, restart: NOW },
   { id: 'floodMute', group: 'Chống nhắn dồn', label: 'Bỏ qua người nhắn dồn trong (giây)', type: 'int', min: 10, max: 3600, env: 'ZALO_FLOOD_MUTE_S', decimal: true, def: 90, restart: NOW },
@@ -46,6 +47,7 @@ function coerce(def, raw) {
   // Số: hiện đúng giá trị bộ đọc nhận — adapter đọc cửa sổ/thời gian chặn bằng float() nên có thể có phần thập phân.
   if (def.type === 'int') { const n = Number(raw); return def.decimal ? (Number.isFinite(n) ? n : def.def) : (Number.isInteger(n) ? n : def.def); }
   if (def.type === 'enum') { const s = String(raw).trim().toLowerCase(); return def.options.some((o) => o.value === s) ? s : def.def; }
+  if (def.type === 'text') return String(raw ?? '').trim();
   return list(raw);
 }
 
@@ -57,6 +59,12 @@ export function validateSetting(def, v) {
     return v;
   }
   if (def.type === 'enum') { if (!def.options.some((o) => o.value === v)) throw err(`${def.label}: chọn lại.`); return v; }
+  if (def.type === 'text') {
+    if (typeof v !== 'string') throw err(`${def.label}: nhập chữ.`);
+    const trimmed = v.trim();
+    if (trimmed.length > (def.max || 500)) throw err(`${def.label}: tối đa ${def.max || 500} ký tự.`);
+    return trimmed;
+  }
   if (!Array.isArray(v) || v.length > def.max) throw err(`${def.label}: tối đa ${def.max} mục.`);
   const rule = { ids: /^\d{1,32}$/, names: /^[\p{L}\p{N} _.-]{1,60}$/u, patterns: /^[A-Za-z0-9_.*?-]{1,64}$/ }[def.type];
   const out = [...new Set(v.map((x) => String(x).trim()).filter(Boolean))];

@@ -23,7 +23,8 @@ function describeStudio(studio, quota) {
 export function describeSettings(s) {
   const off = FEATURES.filter((f) => !s.features[f.key]).map((f) => label[f.key]);
   return [s.active ? 'Hoạt động' : 'Tạm tắt', s.replyOnlyTagged ? 'chỉ trả lời khi được tag' : 'trả lời mọi tin',
-    off.length ? `tắt: ${off.join(', ')}` : 'bật mọi tính năng', ...describeStudio(s.studio, s.studioQuota)].join(' · ');
+    off.length ? `tắt: ${off.join(', ')}` : 'bật mọi tính năng', ...describeStudio(s.studio, s.studioQuota),
+    s.soulReminder ? 'dòng nhắc riêng' : ''].filter(Boolean).join(' · ');
 }
 
 /** Dòng Nhật ký cho thay đổi hàng loạt: "Tạm tắt · bật: Tra cứu web · tắt: Video" — chỉ các mục đã đổi. */

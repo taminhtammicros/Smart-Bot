@@ -23,10 +23,12 @@ export const BULK_KEY = 'bulk';
 // Thư mục nhóm: khoá chọn `f:<mã>` (mã nhóm Zalo luôn là số nên không trùng).
 export const FOLDER_PREFIX = 'f:';
 const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, features: { ...s.features },
-  studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null });
+  studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null,
+  soulReminder: s.soulReminder || '' });
 // Hạn mức theo nhóm/thư mục: lượt xưởng, ảnh AI, video AI (null = theo lớp trên).
 const QUOTA_KEYS = ['studioQuota', 'imageQuota', 'videoQuota'];
 const MAX_RULES = 3000; // = MAX_FOLDER_RULES (lib/permissions.js)
+const MAX_REMINDER = 1000; // = MAX_SOUL (lib/permissions.js)
 const sameQuotas = (a, b) => QUOTA_KEYS.every((k) => (a[k] ?? null) === (b[k] ?? null));
 const sameBools = (a = {}, b = {}) => Object.keys({ ...a, ...b }).every((k) => a[k] === b[k]);
 const quotaText = (v) => (v === null || v === undefined ? '' : String(v));
@@ -67,22 +69,28 @@ export function mergeGroups(groups, perms) {
 
 export function sameSettings(a, b) {
   return a.active === b.active && a.replyOnlyTagged === b.replyOnlyTagged && sameBools(a.features, b.features)
-    && sameBools(a.studio, b.studio) && sameQuotas(a, b);
+    && sameBools(a.studio, b.studio) && sameQuotas(a, b) && (a.soulReminder || '') === (b.soulReminder || '');
 }
 
-/** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, từng tính năng, từng nút xưởng, số lượt. */
+/** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, từng tính năng, từng nút xưởng, số lượt, lời nhắc riêng. */
 export function changeCount(a, b) {
   let n = (a.active !== b.active) + (a.replyOnlyTagged !== b.replyOnlyTagged) + QUOTA_KEYS.filter((k) => (a[k] ?? null) !== (b[k] ?? null)).length;
+  if ((a.soulReminder || '') !== (b.soulReminder || '')) n += 1;
   for (const k of Object.keys({ ...a.features, ...b.features })) if (a.features[k] !== b.features[k]) n += 1;
   for (const k of Object.keys({ ...a.studio, ...b.studio })) if (a.studio?.[k] !== b.studio?.[k]) n += 1;
   return n;
 }
 
 /** Thân PUT của nhóm/mặc định: nút xưởng chỉ gửi khi đủ khoá; số lượt chỉ có ở nhóm. */
-export function settingsPayload(d, { isGroup, studioFeatures = [], policy }) {
+export function settingsPayload(d, { isGroup, studioFeatures = [], policy, previous = {} }) {
   const body = { active: d.active, replyOnlyTagged: d.replyOnlyTagged, features: { ...d.features } };
   if (studioComplete(d.studio, studioFeatures)) body.studio = applyPolicy(d.studio, policy);
   if (isGroup) for (const k of QUOTA_KEYS) body[k] = d[k] ?? null;
+  // Lời nhắc riêng chỉ có nghĩa với nhóm; "Mặc định" dùng ô ZALO_SOUL_REMINDER ở trang Cấu hình.
+  // Nhóm không đặt gì thì không gửi khoá — đó cũng là hình dạng tệp mà diffLayer coi là "không chỉnh riêng".
+  // Chỉ gửi chuỗi rỗng khi chủ động xoá câu đang có, vì vắng mặt = giữ nguyên.
+  const soul = (d.soulReminder || '').trim();
+  if (isGroup && (soul || (previous.soulReminder || '').trim())) body.soulReminder = soul;
   return body;
 }
 
@@ -113,6 +121,8 @@ export function staysListed(id, perms, groups) {
 export function Editor({ target, value, defaults, features, studioFeatures, studioPolicy, defaultQuota, mediaDefaults = null, onSaved, onBack, onDirty, head = true,
   path: savePath = null, baseLabel = 'Dùng mặc định', note = null }) {
   const isGroup = target.id !== DEFAULTS_KEY;
+  // Thư mục cũng dùng Editor này (qua FolderEditor) — lời nhắc của thư mục áp cho mọi nhóm bên trong.
+  const isFolder = String(target.id).startsWith(FOLDER_PREFIX);
   const [draft, setDraft] = useState(() => pick(value));
   const [qText, setQText] = useState(() => quotaText(value.studioQuota));
   const [mText, setMText] = useState(() => ({ imageQuota: quotaText(value.imageQuota), videoQuota: quotaText(value.videoQuota) }));
@@ -137,7 +147,7 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
     setBusy(true); setMsg({});
     try {
       const path = savePath || (isGroup ? `/api/permissions/groups/${encodeURIComponent(target.id)}` : '/api/permissions/defaults');
-      const r = await api(path, { method: 'PUT', body: settingsPayload(draft, { isGroup, studioFeatures, policy: studioPolicy }) });
+      const r = await api(path, { method: 'PUT', body: settingsPayload(draft, { isGroup, studioFeatures, policy: studioPolicy, previous: value }) });
       if (onSaved(r, target.id)) setMsg({ ok: 'Đã lưu — bot áp dụng ngay, không cần khởi động lại.' });
     } catch (err) { setMsg({ error: err.message }); } finally { setBusy(false); }
   }
@@ -183,6 +193,18 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
       media=${isGroup ? mText : null} mediaDefaults=${mediaDefaults || { image: 5, video: 1 }} mediaErrors=${{ imageQuota: mQuota.imageQuota.error, videoQuota: mQuota.videoQuota.error }}
       onMedia=${isGroup ? (k, text) => { setMText((m) => ({ ...m, [k]: text })); setMsg({}); const q = parseQuota(text); if (!q.error) set({ [k]: q.value }); } : null}
       note=${isGroup ? '' : `Số lượt mỗi người mỗi ngày chỉnh ở mục Hạn mức xưởng (đang là ${defaultQuota}).`} />
+    ${isGroup ? html`<details class="perm-box" open=${Boolean(draft.soulReminder)}>
+      <summary><span>${isFolder ? 'Dòng nhắc riêng của thư mục' : 'Dòng nhắc riêng của nhóm'}</span><span class="muted perm-box-sum">· ${draft.soulReminder ? 'đang dùng' : 'chưa đặt'}</span></summary>
+      <p class="muted small">${isFolder
+        ? 'Mọi nhóm trong thư mục nhận câu này; nhóm đặt riêng thì câu của nhóm thắng. '
+        : 'Chỉ nhóm này nhận; để trống thì theo thư mục (nếu có), không thì chỉ dùng dòng nhắc chung. '}
+        Bot nối câu này vào <strong>cuối</strong> tin, ngay sau dòng nhắc chung ở Cấu hình, nên mô hình đọc nó sau cùng. Một dòng, tối đa ${MAX_REMINDER} ký tự.</p>
+      <label for=${`${p}-soul`} class="sr-only">${isFolder ? 'Dòng nhắc riêng của thư mục' : 'Dòng nhắc riêng của nhóm'}</label>
+      <textarea id=${`${p}-soul`} rows="3" maxlength=${MAX_REMINDER} value=${draft.soulReminder || ''}
+        onInput=${(e) => set({ soulReminder: e.currentTarget.value })}
+        placeholder="Vd. Nhóm này là lớp 12A: xưng em, gọi các bạn là anh chị. Không đưa đáp án bài kiểm tra, chỉ gợi ý."></textarea>
+      <p class="muted small">${(draft.soulReminder || '').trim().length}/${MAX_REMINDER} ký tự</p>
+    </details>` : null}
     <${SaveBar} count=${changeCount(draft, value) || (dirty ? 1 : 0)} busy=${busy} canSave=${dirty && !quota.error && !mError} msg=${msg}
       onUndo=${() => { setDraft(pick(value)); setQText(quotaText(value.studioQuota)); resetMedia(value); setMsg({}); }} />
   </form>`;
