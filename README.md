@@ -674,6 +674,21 @@ Biến tuỳ chọn trong `.env` của Hermes:
 
 **Cập nhật lên 1.26.0**: kết nối Zalo (`zalo-directory.js`, `control-api.js`, `hermes-bridge.js`, `server.js`), plugin Hermes (`zalo_tools/insight_ai.py`, `zalo_tools/__init__.py`, hai `plugin.yaml`) và dashboard (`dashboard/`, `scripts/hermes-install-lib.js`, `scripts/install-hermes.js`) cập nhật **cùng lúc**, rồi khởi động lại `zalo-bridge`, gateway và `zalo-dashboard`.
 
+### Chủ nhân bot ra lệnh hệ thống ngay trong Zalo
+
+Mọi UID trong `ZALO_ALLOWED_USERS` gõ thẳng lệnh Hermes vào khung chat Zalo. Sidecar đọc lại biến này khi `.env` của Hermes đổi, nên thêm người mới là có quyền từ tin kế tiếp — không phải khởi động lại cầu nối.
+
+| Lệnh | Ai gõ được | Ghi chú |
+| --- | --- | --- |
+| `/new` `/reset` `/clear` `/STOP` | mọi chủ nhân | `/STOP` dừng gateway Hermes (bot ngừng trả lời tới khi bật lại) |
+| `/model` `/skills` `hermes model list` `hermes skills list\|check\|search\|inspect\|audit` `hermes doctor` `hermes gateway status` `hermes sessions list\|resume` `hermes profile list` `hermes --profile <tên> <lệnh đọc>` | mọi chủ nhân | chỉ đọc; kết quả gửi về dạng chữ, token/khoá bị ẩn |
+| `/memory` `/remember <nội dung>` | mọi chủ nhân | đọc và thêm vào trí nhớ dài hạn của trợ lý |
+| `hermes update` `hermes setup` `hermes gateway start\|setup` `hermes skills install\|update` `hermes profile create` `hermes config set security.*` `hermes model <tên>` | **chỉ chủ nhân chính**, và phải gõ thêm chữ `xác nhận` ở cuối câu (vd. `hermes update xác nhận`) | đổi cấu hình máy; chữ xác nhận được sidecar đối chiếu trên chính tin người dùng gửi, nên trợ lý không thể tự thêm hộ |
+
+Lệnh chạy bằng argv (không qua shell); lệnh lâu (`update`, `gateway start`) chạy nền; token/khoá lẫn trong kết quả được thay bằng `***`.
+
+Lệnh gạch chéo gốc của Hermes (`/new`, `/clear`, `/reset`, `/stop`, `/compress`, `/model`…) chỉ chủ nhân chạy được; người khác gõ thì nhận câu chặn bằng tiếng Việt. Người ngoài chỉ còn `/help`, `/whoami`, `/status`, `/context`.
+
 ### Trí nhớ dài hạn (tự học, tắt mặc định — chỉ máy chủ Linux)
 
 Bot tự rút điều đáng nhớ từ các cuộc trò chuyện (cách xưng hô, sở thích, việc đang dở) và tự nhắc lại ở lần sau — **tách riêng từng nhóm và từng người**: nhóm này không bao giờ thấy trí nhớ của nhóm khác hay tin nhắn riêng của ai. Hỏi chính xác chuyện cũ ("hôm trước ai gửi file gì") thì bot tra lịch sử tin nhắn thật bằng `zalo_thread_history`, không dựa vào trí nhớ. Chủ nhân dặn "nhớ giúp…" / "quên chuyện… đi" thì bot ghi/xoá đúng trong trí nhớ của cuộc trò chuyện đang nói.

@@ -185,6 +185,21 @@ Phase 7A (1.26.0) adds six pages and regroups the sidebar into Overview · Conve
 
 Phase 7B (1.27.0) adds five admin-only pages (owners never see them; the API answers 403). **Agent**: switch the model (only names listed by the AI gateway; takes effect immediately, like `/model`), the reasoning level, and the SOUL.md persona with 30 snapshots plus the original. **Tools**: every Zalo tool, who can use it and which permission switch controls it; turn individual public tools off for non-owners (`tools.off` in `permissions.json`, immediate; owners are exempt). **Agent trace**: the assistant's sessions read-only from Hermes `state.db` (Zalo, cron, all), turn by turn, with tool calls (argument names and types only, never values), ok/error status, timings, tokens and model; tool results and system prompts are never shown, and secret-looking strings in previews are masked. **MCP connections**: the MCP servers in `config.yaml` (name, transport, host:port or command name — never env, headers, args or URL paths), whether members may use them (`ZALO_PUBLIC_MCP`), a status probe that only touches loopback addresses (stdio servers are not spawned), and enable/disable; adding servers stays a server-side `hermes mcp install`. **Settings**: a fixed allowlist of 13 non-secret settings with typed validation, each written where it is currently effective (`platforms.zalo.extra` in `config.yaml` or the Hermes `.env`, both with `.bak`, atomic writes and a 409 when `config.yaml` changed underneath), plus per-group welcome messages. Everything except the model, tools and welcome messages needs an assistant restart, shown in a shared yellow banner with a one-click restart. Update the Hermes plugin and the dashboard together; see `README.md` (Vietnamese) for the manual checklist.
 
+### Bot owners can run system commands from Zalo
+
+Every UID in `ZALO_ALLOWED_USERS` may type Hermes commands straight into a Zalo chat; the sidecar re-reads the variable when the Hermes `.env` changes, so a new owner works on the next message without restarting the bridge.
+
+| Command | Who | Notes |
+| --- | --- | --- |
+| `/new` `/reset` `/clear` `/STOP` | every owner | `/STOP` stops the Hermes gateway (the assistant stops answering until started again) |
+| `/model` `/skills` `hermes model list` `hermes skills list\|check\|search\|inspect\|audit` `hermes doctor` `hermes gateway status` `hermes sessions list\|resume` `hermes profile list` `hermes --profile <name> <read command>` | every owner | read-only; output is returned as text, secrets redacted |
+| `/memory` `/remember <text>` | every owner | reads and appends to the assistant's long-term memory |
+| `hermes update` `hermes setup` `hermes gateway start\|setup` `hermes skills install\|update` `hermes profile create` `hermes config set security.*` `hermes model <name>` | **main owner only**, plus the word `xác nhận` at the end (e.g. `hermes update xác nhận`) | machine-changing; the confirmation word is checked by the sidecar against the raw message, so the assistant cannot add it on a user's behalf |
+
+Commands run as argument vectors (never through a shell), long ones (`update`, `gateway start`) run detached, and tokens or keys found in the output are replaced with `***`.
+
+Hermes' own slash commands (`/new`, `/clear`, `/reset`, `/stop`, `/compress`, `/model`…) are owner-only; anyone else gets a plain Vietnamese refusal. Non-owners keep `/help`, `/whoami`, `/status`, `/context`.
+
 ### Long-term memory (self-learned, off by default — Linux servers only)
 
 The bot extracts what is worth remembering from conversations (how people want to be addressed, preferences, unfinished work) and recalls it next time — **separately for every group and every person**: one group never sees another group's memory or anyone's private messages. For exact questions about the past ("who sent which file the other day") the bot looks up the real message history with `zalo_thread_history` instead of relying on memory. When the owner says "remember…" / "forget…", the bot writes or deletes inside the memory of the conversation it is speaking in.

@@ -1796,3 +1796,77 @@ test('kết quả việc hẹn giờ của chính người đã hỏi vẫn khô
     stopHermesBridge();
   }
 });
+
+test('mọi hàm sửa trạng thái Zalo đều cần chủ nhân — người trong nhóm không đổi được nhóm', async (t) => {
+  const calls = [];
+  const api = new Proxy({}, { get: (_o, name) => (...args) => { calls.push(name); return Promise.resolve({ ok: true }); } });
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    const member = auth('group-1', 1, { actorUid: 'member' });
+    // Những hàm từng xếp mức "public": dùng khoá công khai đổi tên nhóm, thêm/xoá
+    // thành viên, chuyển tiếp tin của nhóm. Người trong nhóm không được gọi.
+    for (const [method, args] of [
+      ['changeGroupName', ['Đổi tên', 'group-1']],
+      ['addUserToGroup', [['victim'], 'group-1']],
+      ['removeUserFromGroup', [['victim'], 'group-1']],
+      ['forwardMessage', [{}, 'group-1', 1]],
+      ['createPoll', [{ question: 'x', options: ['a', 'b'] }, 'group-1']],
+      ['setMute', [{}, 'group-1', 1]],
+    ]) {
+      const reqId = `deny-${method}`;
+      ws.send(JSON.stringify({ type: 'invoke', reqId, method, args, auth: member }));
+      const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === reqId);
+      assert.equal(ack.ok, false, method);
+      assert.equal(ack.errorCode, 'owner_required', method);
+    }
+    assert.deepEqual(calls, [], 'không hàm Zalo nào bị gọi');
+    // Gửi chữ trong chính hội thoại vẫn mở cho người trong nhóm.
+    ws.send(JSON.stringify({ type: 'invoke', reqId: 'ok-send', method: 'sendMessage', args: [{ msg: 'chào' }, 'group-1', 1], auth: member }));
+    const ok = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'ok-send');
+    assert.equal(ok.ok, true);
+    assert.deepEqual(calls, ['sendMessage']);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('owner_command chỉ chạy cho chủ nhân, kể cả khi người khác gửi đúng frame', async (t) => {
+  const api = new Proxy({}, { get: () => () => Promise.resolve({ ok: true }) });
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'owner_command', reqId: 'oc-public', text: 'hermes doctor', role: 'main',
+      auth: auth('group-1', 1, { actorUid: 'member' }),
+    }));
+    const denied = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'oc-public');
+    assert.equal(denied.ok, false);
+    assert.equal(denied.errorCode, 'owner_required');
+
+    // Chủ nhân gõ câu sai cú pháp: không chạy tiến trình nào, trả hướng dẫn.
+    ws.send(JSON.stringify({
+      type: 'owner_command', reqId: 'oc-owner', text: '/remember', role: 'owner',
+      auth: auth('owner', 0),
+    }));
+    const usage = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'oc-owner');
+    assert.equal(usage.ok, true);
+    assert.match(usage.result.reply, /\/remember/);
+    assert.equal(usage.result.handled, true);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});

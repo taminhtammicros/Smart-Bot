@@ -13,6 +13,9 @@ const OWNER_READ_METHODS = new Set([
   'getPollDetail', 'getPendingGroupMembers', 'getGroupLinkDetail',
 ]);
 
+// Chỉ gửi chữ/tệp/thoại/nhắc hẹn — việc người trong nhóm nhờ bot làm trong chính
+// hội thoại họ đang nói (sameThread bên dưới). Mọi hàm sửa trạng thái Zalo (tên
+// nhóm, thành viên, ghim, chuyển tiếp, bảng hỏi…) thuộc OWNER_SIDE_EFFECT_METHODS.
 const PUBLIC_SIDE_EFFECT_METHODS = new Set([
   'sendMessage', 'sendVoice', 'sendSticker', 'sendLink', 'uploadAttachment',
   'createReminder', 'removeReminder',
@@ -78,6 +81,12 @@ function classify(command) {
   if (PUBLIC_COMMANDS.has(command.type)) return { minimumRole: 'public', category: 'send', dangerous: false };
   if (command.type === 'group_members') return { minimumRole: 'public', category: 'read', dangerous: false };
   if (command.type === 'history') return { minimumRole: 'public', category: 'read', dangerous: false };
+  // Lệnh hệ thống của chủ nhân (owner-commands.js): chạy CLI Hermes. Đổi máy thì cần
+  // xác nhận như các hàm admin khác; lệnh đọc thì không.
+  if (command.type === 'owner_command') {
+    return { minimumRole: 'owner', category: 'admin', dangerous: command.role === 'main' && command.confirm === true };
+  }
+  if (command.type === 'owner_reset_session') return { minimumRole: 'owner', category: 'read', dangerous: false };
   // Đọc cả một khoảng thời gian (có thể hàng nghìn tin) chỉ dành cho chủ nhân.
   if (command.type === 'history_range') return { minimumRole: 'owner', category: 'read', dangerous: false };
   // Tra lịch sử của thành viên (spec §19.5): chỉ đọc kho, tối đa 40 tin, đúng hội thoại đang thao tác (sameThread bên dưới).

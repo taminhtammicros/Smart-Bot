@@ -63,7 +63,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
@@ -104,6 +104,7 @@ from .flood import FloodGuard
 from . import model_command as _model_command
 from . import call_words as _call_words
 from . import live_settings as _live_settings
+from . import owner_command as _owner_command
 
 
 def _transcode_to_m4a(audio_path: str) -> Optional[str]:
@@ -488,6 +489,11 @@ def _attachment_failure_reason(exc: BaseException, url: str, name: str = "") -> 
 THREAD_TYPE_USER = 0
 THREAD_TYPE_GROUP = 1
 
+# Lệnh gạch chéo gốc của Hermes: người ngoài chỉ chạy được nhóm chỉ đọc, và
+# nhóm đổi trạng thái thì không bao giờ (xem ``_blocked_slash``).
+_READ_ONLY_SLASH = frozenset({"help", "whoami", "status", "context"})
+_STATE_SLASH = frozenset({"new", "clear", "reset", "compress", "stop", "resume"})
+
 # Zalo IDs: long numeric, never leading zero. Phone numbers are the opposite.
 _ZALO_ID_RE = re.compile(r"^[1-9]\d{14,21}$")
 
@@ -580,6 +586,17 @@ class ZaloAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform("zalo"))
+
+        # Ai được gõ lệnh Hermes ngay trong Trợ lý: chỉ chủ nhân. Danh sách này được
+        # gateway đọc mỗi lượt; hàm tính lại từ .env nên thêm chủ nhân là có hiệu lực
+        # ngay. Không đặt thì gateway coi mọi người trong nền tảng là admin.
+        if isinstance(getattr(config, "extra", None), dict):
+            config.extra.setdefault("allow_admin_from", self._slash_admin_ids)
+            config.extra.setdefault("group_allow_admin_from", self._slash_admin_ids)
+            # Trần quyền của người ngoài: luôn có /help để gating BẬT ở scope đó —
+            # để rỗng thì Hermes tắt gating và ai cũng thành admin (xem _slash_access).
+            for key in ("user_allowed_commands", "group_user_allowed_commands"):
+                config.extra.setdefault(key, self._slash_user_commands)
 
         extra = config.extra or {}
         # Env thắng config.yaml (đúng như docstring đầu tệp): trình cài luôn ghi
@@ -1053,6 +1070,19 @@ class ZaloAdapter(BasePlatformAdapter):
                             metadata={"chat_type": "group" if is_group else "dm"})
             return
 
+        # Lệnh hệ thống của chủ nhân (/new, /memory, /remember, hermes …): chạy rồi
+        # trả kết quả về đúng hội thoại, không đẩy sang mô hình. Người ngoài không
+        # tới được đây (đã lọc theo nhóm/nhắn riêng ở trên); xét lại cho chắc.
+        owner_cmd = _owner_command.parse(turn["text"])
+        if owner_cmd is not None:
+            if not turn["is_owner"]:
+                logger.info("[zalo] bỏ qua lệnh chủ nhân %r từ %s (%s)", turn["text"][:60],
+                            sender_name, sender_uid)
+                return
+            await self._run_owner_command(thread_id, sender_uid, owner_cmd,
+                                          is_group=is_group, msg_id=msg_id)
+            return
+
         # Chặn nhắn dồn dập. Đặt sau cổng kiểm quyền (chỉ đếm tin thật sự
         # dành cho bot) nhưng TRƯỚC cả thả cảm xúc lẫn gọi mô hình — người
         # đang spam không đáng được phản hồi gì, kể cả một trái tim.
@@ -1224,6 +1254,21 @@ class ZaloAdapter(BasePlatformAdapter):
         reminder = "\n\n".join(part for part in reminders if part)
         if reminder:
             prompt_text = f"{prompt_text}\n\n{reminder}" if prompt_text.strip() else reminder
+        # Cửa chặn lệnh gạch chéo, đặt ngay tại adapter. Bộ lọc của Hermes
+        # (``allow_admin_from``) đọc ``config.extra`` của nền tảng; nếu tiến trình
+        # gateway giữ một bản cấu hình khác, gating tắt và ai cũng thành admin —
+        # đúng cảnh log 20/10 23:33: thành viên nhóm gõ ``/new`` của Hermes và
+        # phiên của chính họ bị xoá. Ở đây danh sách chủ nhân đọc thẳng từ
+        # ``ZALO_ALLOWED_USERS``, nên không phụ thuộc bản cấu hình nào.
+        if is_group or not is_owner:
+            blocked = self._blocked_slash(prompt_text, sender_uid)
+            if blocked:
+                logger.info("[zalo] chặn lệnh gạch chéo %r từ %s (%s)", prompt_text[:40],
+                            sender_name, sender_uid)
+                await self.send(thread_id, blocked,
+                                metadata={"chat_type": "group" if is_group else "dm"})
+                return
+
         event = MessageEvent(
             text=prompt_text,
             message_type=(
@@ -1293,6 +1338,69 @@ class ZaloAdapter(BasePlatformAdapter):
             logger.debug("[zalo] không ghi được lượt dùng bot", exc_info=True)
 
         await self.handle_message(event)
+
+    async def _run_owner_command(
+        self, thread_id: str, sender_uid: str, command: "_owner_command.OwnerCommand",
+        *, is_group: bool, msg_id: str = "",
+    ) -> None:
+        """Chạy lệnh chủ nhân và trả kết quả. Câu hỏi hướng dẫn/sai cú pháp thì trả ngay."""
+        metadata = {"chat_type": "group" if is_group else "dm"}
+        if not command.command:
+            await self.send(thread_id, command.usage or "Lệnh không hợp lệ.", metadata=metadata)
+            return
+        role = _owner_command.role_for(sender_uid) or "owner"
+        if command.dangerous and role != "main":
+            await self.send(
+                thread_id,
+                f"🔒 `{command.display}` đổi cấu hình máy chạy bot nên chỉ chủ nhân chính chạy được.",
+                metadata=metadata,
+            )
+            return
+        await self.send_typing(thread_id, metadata=metadata)
+        result = await _owner_command.run(self, command.display, role=role)
+        reply = str(result.get("reply") or "(không có kết quả)")
+        if result.get("newSession"):
+            await self._rotate_session(thread_id, sender_uid, is_group=is_group)
+        await self.send(thread_id, reply, metadata=metadata)
+
+    async def _rotate_session(self, thread_id: str, sender_uid: str, *, is_group: bool) -> bool:
+        """Bỏ phiên đang nạp của hội thoại (``/new``), dùng chính đối tượng gateway.
+
+        Adapter là lớp cha của ``HermesGateway``, nên các hàm quản lý phiên của
+        gateway có ngay trên ``self``: xoá phiên trong kho, bỏ tác nhân đang giữ
+        trong bộ nhớ, và báo hook ``session:reset`` — y như lệnh ``/new`` gốc.
+
+        Zalo chạy plugin trong tiến trình gateway và bản chất lệnh ``/new`` là đổi
+        mã phiên trong kho, còn giữ bộ nhớ hiện tại là logic riêng của bot: trí
+        nhớ dài hạn (MEMORY.md) nằm trên đĩa và được nạp lại mỗi lượt, nên ngữ
+        cảnh ngắn của hội thoại bắt đầu lại còn trí nhớ thì không mất.
+        """
+        try:
+            source = self.build_source(
+                chat_id=thread_id,
+                chat_name=thread_id if is_group else sender_uid,
+                chat_type="group" if is_group else "dm",
+                user_id=sender_uid,
+                user_name=sender_uid,
+                role_authorized=True,
+            )
+            session_key = self._session_key_for_source(source)
+            old_entry = self.session_store._entries.get(session_key)
+            self._invalidate_session_run_generation(session_key, reason="session_reset")
+            self._release_running_agent_state(session_key)
+            await self._cleanup_old_agent_for_reset(session_key)
+            self._evict_cached_agent(session_key)
+            self._clear_conversation_scope(session_key, reason="session_reset")
+            self.session_store.reset_session(session_key)
+            old_sid = getattr(old_entry, "session_id", None)
+            new_entry = self.session_store._entries.get(session_key)
+            new_sid = getattr(new_entry, "session_id", None)
+            await self._fire_session_reset_hooks(source, session_key, old_sid, new_sid)
+            logger.info("[zalo] /new: phiên của %s chuyển %s → %s", session_key, old_sid, new_sid)
+            return True
+        except Exception:
+            logger.warning("[zalo] không xoá được phiên đang nạp — để lượt sau tự bắt đầu", exc_info=True)
+            return False
 
     @staticmethod
     def _group_rules(thread_id: str) -> Optional[Dict[str, Any]]:
@@ -2027,6 +2135,82 @@ class ZaloAdapter(BasePlatformAdapter):
                 pass
             return False
 
+    # Lệnh Hermes đổi trạng thái hội thoại hoặc cấu hình. Không bao giờ mở cho người
+    # ngoài — kể cả khi họ chưa nằm trong danh sách lệnh chủ nhân của plugin.
+    SLASH_STATE_COMMANDS = frozenset({"new", "clear", "reset", "compress", "stop"})
+
+    def _slash_access(self, sender_uid: str) -> Tuple[List[str], List[str]]:
+        """``(admin, lệnh mở cho người ngoài)`` cho bộ lọc lệnh gạch chéo của Hermes.
+
+        Bẫy đã trúng một lần trên máy thật (20/10/2026): mục 23:33 log ghi thành viên
+        nhóm "Cá Heo - Ai" gõ ``/new`` và phiên của chính họ bị xoá. Nguyên nhân không
+        phải danh sách chủ nhân sai (UID của họ không có trong ``ZALO_ALLOWED_USERS``)
+        mà là luật của Hermes: gating tắt khi ``allow_admin_from`` **rỗng**, và tắt
+        thì ai cũng là admin. Adapter cũ trả danh sách rỗng cho người ngoài.
+
+        Nay danh sách admin luôn đúng bằng danh sách chủ nhân (rỗng thì gateway tắt
+        gating, nên không ai là admin) và danh sách lệnh cho người ngoài luôn có ít
+        nhất ``/help`` để bật gating ở scope đó. Các lệnh đổi trạng thái không nằm
+        trong danh sách ấy: chỉ chủ nhân chạy được, qua đường lệnh chủ nhân của
+        plugin (kiểm UID lần nữa, đổi máy thì đòi chữ ``xác nhận``).
+        """
+        admins = list(_owner_command.owners())
+        uid = str(sender_uid or "")
+        if uid in admins:
+            return admins, []
+        return admins, ["help", "whoami"]
+
+    def _blocked_slash(self, text: str, sender_uid: str) -> Optional[str]:
+        """Lệnh gạch chéo mà người này không được chạy: câu trả lời; ``None`` thì cho qua.
+
+        Lệnh chủ nhân (/new, /memory, /remember, /model, /skills, /stop) do plugin
+        xử lý trước khi tới đây, nên chỗ này chỉ còn lệnh gốc của Hermes
+        (/new, /clear, /reset, /compress, /stop, /model… của gateway). Danh sách
+        đọc được giữ lại; mọi thứ khác của người ngoài bị chặn — người ngoài
+        nhắn "/abc" cũng thành câu hỏi thường, không phải lệnh hệ thống.
+        """
+        name = str(text or "").lstrip().split(None, 1)[0].lstrip("/").lower() \
+            if str(text or "").lstrip().startswith("/") else ""
+        if not name or name in _READ_ONLY_SLASH or _owner_command.role_for(sender_uid):
+            return None
+        if name in _STATE_SLASH:
+            return ("🔒 Lệnh này chỉ chủ nhân bot chạy được. Cần mở phiên mới thì nhờ chủ "
+                    "nhân gõ `/new`.")
+        return (f"🔒 `/{name}` là lệnh hệ thống của Hermes; bạn không có quyền dùng ở đây. "
+                "Gõ `/help` để xem những gì bạn dùng được.")
+
+    def _slash_admin_ids(self) -> List[str]:
+        """Danh sách chủ nhân cho ``allow_admin_from`` của gateway."""
+        return list(_owner_command.owners())
+
+    def _slash_user_commands(self) -> List[str]:
+        """Lệnh gạch chéo mở cho người ngoài — để gating của Hermes bật."""
+        return self._slash_access("")[1]
+
+    def _slash_error_message(self, source, canonical_cmd: str) -> Optional[str]:
+        """Câu trả lời khi Hermes chặn lệnh gạch chéo của người ngoài.
+
+        Mặc định của Hermes là một câu tiếng Anh nhắc quản trị đặt
+        ``allow_admin_from`` — với khách dùng Zalo thì vô nghĩa và mang tiếng nội bộ.
+        """
+        del source
+        if str(canonical_cmd or "").lower() in self.SLASH_STATE_COMMANDS:
+            return ("🔒 Lệnh này chỉ chủ nhân bot chạy được. Cần mở phiên mới thì nhờ chủ "
+                    "nhân gõ `/new`.")
+        return (f"🔒 Bạn không có quyền dùng `/{canonical_cmd}` ở đây. "
+                "Gõ `/help` để xem những gì bạn dùng được.")
+
+    def _slash_admin_ids(self) -> List[str]:
+        """Danh sách "admin" của nền tảng cho bộ lọc lệnh gạch chéo của Hermes.
+
+        Gateway mặc định coi mọi người trên nền tảng là admin khi ``allow_admin_from``
+        không được đặt — nghĩa là thành viên nhóm gõ ``/new`` cũng đổi phiên của cả
+        nhóm và người ngoài gõ được lệnh chủ nhân. Đặt đúng danh sách chủ nhân thì
+        người ngoài chỉ còn ``/help``, ``/whoami``. Đọc lại mỗi lượt, nên thêm chủ
+        nhân trên dashboard là có hiệu lực ngay.
+        """
+        return list(_owner_command.owners())
+
     def _is_owner(self, sender_uid: str) -> bool:
         """Người này có nằm trong ZALO_ALLOWED_USERS không.
 
@@ -2036,7 +2220,9 @@ class ZaloAdapter(BasePlatformAdapter):
         thì bật cờ đó lên là cả nhóm thành chủ nhân, và toàn bộ lớp phân quyền
         toolset thành vô nghĩa.
         """
-        allowed = _split_ids(_get_scoped_secret("ZALO_ALLOWED_USERS", "") or "")
+        # Đọc os.environ mỗi lượt: live_settings chép lại .env khi tệp đổi, nên thêm
+        # chủ nhân trên dashboard là có hiệu lực ở tin kế tiếp.
+        allowed = _split_ids(os.getenv("ZALO_ALLOWED_USERS", "") or "")
         return bool(allowed) and str(sender_uid) in allowed
 
     def _may_greet(self, sender_uid: str) -> bool:
@@ -2315,6 +2501,31 @@ class ZaloAdapter(BasePlatformAdapter):
             {"type": "friend_group", "action": action, "_confirmed": confirmed, **fields},
             expect_ack=True,
         )
+
+    async def owner_command(self, text: str, *, role: str = "owner") -> Optional[Dict[str, Any]]:
+        """Chạy lệnh hệ thống của chủ nhân qua sidecar (đọc rate/API của cầu nối).
+
+        Sidecar trả cả khung ``ack`` (``{"type": "ack", "ok": true, "result":
+        {...}}``), không trả thẳng kết quả như ``_command`` của adapter đọc ở
+        chỗ khác. Gỡ một lớp ``result`` ở đây để người gọi luôn nhận đúng
+        ``reply``/``newSession`` (sự cố 21/10: ``/new`` xong mà bot trả
+        "(không có kết quả)").
+        """
+        ack = await self._command(
+            {"type": _owner_command.BRIDGE_COMMAND, "text": str(text), "role": str(role)},
+            expect_ack=True,
+        )
+        if not isinstance(ack, dict):
+            return None
+        if ack.get("type") == "ack":
+            if ack.get("ok") is False:
+                return {
+                    "reply": f"⚠️ Cầu nối từ chối lệnh: {ack.get('error') or ack.get('errorCode') or 'không rõ lý do'}",
+                    "handled": True, "denied": True,
+                }
+            payload = ack.get("result")
+            return payload if isinstance(payload, dict) else None
+        return ack
 
     async def group_members(self, chat_id: str) -> Optional[Dict[str, Any]]:
         return await self._command(

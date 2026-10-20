@@ -23,6 +23,10 @@ HOT_KEYS = (
     "ZALO_OWNER_ONLY_GROUPS", "ZALO_FLOOD_THRESHOLD", "ZALO_FLOOD_WINDOW_S", "ZALO_FLOOD_MUTE_S",
     "ZALO_MEDIA_LOOKBACK", "ZALO_CONFIRM_DANGEROUS", "ZALO_KB_PUBLIC_DIRS", "ZALO_PUBLIC_MCP",
     "ZALO_SOUL_REMINDER",
+    # Ai là chủ nhân bot và ai là chủ nhân chính — dashboard sửa xong là có hiệu lực
+    # ở tin kế tiếp, không phải khởi động lại kết nối Zalo (adapter và cầu nối đều
+    # đọc os.environ mỗi lượt).
+    "ZALO_ALLOWED_USERS", "ZALO_MAIN_OWNER",
 )
 
 

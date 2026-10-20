@@ -10,6 +10,8 @@ import { pickSmartReaction } from './smart-reaction.js';
 import { RateLimiter, RateLimitedError, THROTTLED_METHODS } from './rate-limiter.js';
 import { openZaloStore } from './zalo-store.js';
 import { authorizeBridgeCommand } from './zalo-policy.js';
+import { createOwnerDirectory } from './zalo-owners.js';
+import { createOwnerCommandRunner } from './owner-commands.js';
 import { readWelcomeConfig, updateWelcomeGroup } from './zalo-welcome.js';
 import { friendToolsEnabled, getActiveFriendManager } from './zalo-friends.js';
 import { quoteForAsk } from './zalo-reply-anchor.js';
@@ -171,11 +173,26 @@ let selfProfile = null;
 let activeStore = null;
 let ownsActiveStore = false;
 let activeAccountId = 'unknown';
-let activeOwnerUids = new Set();
+// Danh sách chủ nhân đọc lại khi `.env` của Hermes đổi — thêm chủ nhân trên
+// dashboard là có hiệu lực ở lượt kế tiếp, không phải khởi động lại kết nối.
+let ownerDirectory = createOwnerDirectory();
+function activeOwnerUids() {
+  return ownerDirectory.uids();
+}
 // () => mục `dm` của permissions.json (dm-rules.js) hoặc null — lớp chặn thứ hai cho tin nhắn riêng.
 let activeDmRules = null;
 let activeHealth = null;
 let staleTimer = null;
+// Chạy lệnh chủ nhân (owner-commands.js): mức 'main' hay 'owner' do plugin
+// Python chọn theo ZALO_MAIN_OWNER; sidecar kiểm lại UID rồi mới chạy.
+let ownerCommandRunner = createOwnerCommandRunner({ env: () => process.env });
+export function runOwnerCommand(text, role = null) {
+  return ownerCommandRunner(text, role);
+}
+/** Đường chạy lệnh chủ nhân; test thay bằng tiến trình giả để không gọi CLI thật. */
+export function setOwnerCommandRunner(fn) {
+  ownerCommandRunner = fn;
+}
 let clientSequence = 0;
 const clientIds = new Map();
 let maxBackfillPages = Number(process.env.ZALO_BACKFILL_MAX_PAGES) || 10;
@@ -438,8 +455,12 @@ export function startHermesBridge({
   activeAccountId = String(profile?.user_id ?? profile?.userId ?? 'unknown');
   activeStore = store || defaultStore();
   ownsActiveStore = !store;
-  activeOwnerUids = new Set(ownerUids || String(process.env.ZALO_ALLOWED_USERS || '')
-    .split(',').map((value) => value.trim()).filter(Boolean));
+  ownerDirectory = createOwnerDirectory({
+    home: process.env.HERMES_HOME || '',
+    // Chỉ dùng danh sách cố định khi người gọi truyền vào (test, nhúng); còn lại
+    // luôn đọc `.env` để dashboard sửa là có hiệu lực ngay.
+    fixed: ownerUids || process.env.ZALO_OWNERS_FIXED || null,
+  });
   activeDmRules = typeof dmRules === 'function' ? dmRules : null;
   activeHealth = health;
   maxBackfillPages = Math.max(1, Number(pageLimit) || Number(process.env.ZALO_BACKFILL_MAX_PAGES) || 10);
@@ -566,7 +587,7 @@ export function stopHermesBridge() {
   activeStore = null;
   ownsActiveStore = false;
   memberDirectory = null;
-  activeOwnerUids = new Set();
+  ownerDirectory = createOwnerDirectory();
   activeDmRules = null;
   activeHealth = null;
   limiter = null;
@@ -879,6 +900,7 @@ function policyErrorMessage(code) {
     command_denied: 'Lệnh không được phép',
     dm_not_allowed: 'Người này chưa được phép nhắn riêng với bot',
     feature_disabled: 'Chủ bot đang tắt tính năng này khi nhắn riêng',
+    owner_command_denied: 'Lệnh này chỉ chủ nhân chính chạy được',
   };
   return messages[code] || 'Lệnh không được phép';
 }
@@ -919,7 +941,7 @@ async function handleCommand(ws, cmd) {
   // (so === 1) phải hiểu cùng một hội thoại — "1" dạng chuỗi không được qua policy là nhóm rồi chạy như nhắn riêng.
   if (cmd.threadType != null) cmd.threadType = Number(cmd.threadType);
 
-  const authorization = authorizeBridgeCommand(cmd, { ownerUids: activeOwnerUids, dmRules: activeDmRules });
+  const authorization = authorizeBridgeCommand(cmd, { ownerUids: activeOwnerUids(), dmRules: activeDmRules });
   const shouldAudit = ['send', 'admin', 'undo'].includes(authorization.category);
   const auditRequestId = String(cmd.reqId || `bridge-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   let auditFinished = false;
@@ -1080,6 +1102,43 @@ async function handleCommand(ws, cmd) {
       }
 
       if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, msgId: lastMsgId ? String(lastMsgId) : null });
+      break;
+    }
+
+    case 'owner_command': {
+      // Lệnh chủ nhân gõ trong Zalo (vd. "/new", "hermes gateway status"). Plugin
+      // Python đã phân loại; sidecar xét lại lần nữa rồi chạy CLI Hermes bằng
+      // argv (không qua shell) và trả kết quả để plugin gửi về đúng hội thoại.
+      const actor = String(cmd.auth?.actorUid || '');
+      if (!activeOwnerUids().has(actor)) {
+        if (cmd.reqId) {
+          send(ws, { type: 'ack', reqId: cmd.reqId, ok: false, errorCode: 'owner_required', error: policyErrorMessage('owner_required') });
+        }
+        break;
+      }
+      const result = await runOwnerCommand(String(cmd.text || ''), cmd.role === 'main' ? 'main' : 'owner');
+      if (cmd.reqId) {
+        send(ws, {
+          type: 'ack', reqId: cmd.reqId, ok: true,
+          result: {
+            reply: result?.reply || '(không có kết quả)',
+            handled: Boolean(result?.handled),
+            denied: Boolean(result?.denied),
+            newSession: Boolean(result?.newSession),
+          },
+        });
+      }
+      break;
+    }
+
+    case 'owner_reset_session': {
+      // `/new` đã xong phía lệnh: plugin bỏ phiên đang nạp của hội thoại. Sidecar
+      // chỉ xác nhận để hai bên không lệch nhau về ý nghĩa của lệnh.
+      if (!activeOwnerUids().has(String(cmd.auth?.actorUid || ''))) {
+        if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: false, errorCode: 'owner_required', error: policyErrorMessage('owner_required') });
+        break;
+      }
+      if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: true });
       break;
     }
 

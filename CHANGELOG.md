@@ -3,6 +3,29 @@
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
 ## [Chưa phát hành]
+### Sửa — Lệnh chủ nhân chạy xong nhưng bot trả "(không có kết quả)" (sự cố 21/10 00:09–00:18)
+
+- **Hiện tượng, đúng như Zalo:** 00:09:42, 00:10:17, 00:15:54 chủ nhân gõ `@Minh Luan /new`, bot trả `(không có kết quả)`. `hermes gateway status` (00:10) và cả trợ lý trong nhóm (00:18) cũng chỉ nhận đúng câu đó — không phải lỗi riêng của `/new`.
+- **Nguyên nhân:** adapter gửi khung `owner_command`, sidecar trả `{"type":"ack","ok":true,"result":{"reply":…,"newSession":…}}`, nhưng cả `ZaloAdapter.owner_command()` lẫn `owner_command.run()` đều chuyển **nguyên khung** cho người gọi. Adapter đọc `reply` ở cấp ngoài, không thấy gì, in câu dự phòng — lệnh vẫn chạy (phiên vẫn được mở mới), chỉ câu trả lời mất. Lỗi cũ hơn nằm ngay trước đó (`'ZaloAdapter' object has no attribute 'request'`, 23:56–00:01) phát ra cùng một câu.
+- **Nay gỡ đúng một lớp `ack`** ở `owner_command.run()`: `ok: true` thì trả `result` (nên `/new` hiện "🧹 Đã mở phiên mới…" và bỏ phiên đang nạp), `ok: false` thì thành câu "Cầu nối từ chối lệnh: <lý do>". Đọc và ghi đều đi chung một cửa nên mọi lệnh chủ nhân (`/new`, `/memory`, `hermes …`) đều được sửa.
+- **Đo:** `test_zalo_owner_command.py` có hai test mới dựng đúng khung `ack` (thành công và bị từ chối); bộ adapter + lệnh chủ nhân + cổng gạch chéo + phân quyền chạy xanh (260 test; `test_file_maker…` chỉ đỏ khi máy không có font tiếng Việt).
+
+
+### Sửa — Thành viên nhóm không còn gõ được lệnh Hermes (sự cố 20/10 23:33)
+
+- **Hiện tượng, đúng như log:** 23:33:36 nhóm ghi `Cá Heo - Ai (4518453571817811773): @Minh Luan /new`, 23:33:36.8 gateway ghi `Invalidated run generation … (session_reset)` — phiên của chính người đó bị xoá. UID này **không** nằm trong `ZALO_ALLOWED_USERS` (đã đối chiếu `.env`), nên lỗi không ở danh sách chủ nhân.
+- **Nguyên nhân:** Hermes chỉ bật lọc lệnh gạch chéo khi `allow_admin_from` **không rỗng**; rỗng thì "ai cũng là admin". Adapter cũ trả danh sách rỗng cho người ngoài, nên lọc tắt và `/new` gốc của Hermes chạy.
+- **Nay có hai lớp:** cấu hình gửi gateway luôn giữ danh sách admin đúng bằng chủ nhân và danh sách lệnh cho người ngoài không rỗng (`help`, `whoami`) để lọc luôn bật; adapter chặn ngay tại cửa vào mọi lệnh gạch chéo của Hermes (`/new`, `/clear`, `/reset`, `/stop`, `/compress`, `/model`, `/remember`…) từ người không phải chủ nhân, không phụ thuộc bản cấu hình mà tiến trình gateway đang giữ. Chỉ `/help`, `/whoami`, `/status`, `/context` còn mở.
+- **Câu chặn bằng tiếng Việt**, không lộ hướng dẫn nội bộ của Hermes như `allow_admin_from` hay `user_allowed_commands`.
+- **Đo:** `test_zalo_slash_gate.py` dựng lại đúng cái UID trong log và khẳng định `/new` bị chặn, chủ nhân vẫn mở phiên mới được, câu chuyện thường không bị đụng. Bộ adapter (155 test) xanh.
+
+### Thêm — Mọi chủ nhân bot ra lệnh hệ thống được, lệnh đổi máy vẫn khoá ở chủ nhân chính
+
+- **Chủ nhân gõ thẳng lệnh Hermes trong Zalo**: `/new` `/reset` `/clear` `/model` `/memory` `/remember` `/skills` `/STOP`, `hermes` (`setup`, `model`, `doctor`, `update`), `hermes sessions list|resume`, `hermes profile create|list`, `hermes --profile <tên> <lệnh đọc>`, `hermes gateway setup|start|status`, `hermes skills search|install|inspect|check|update|list|audit`, `hermes config set security.*`. Danh sách chủ nhân đọc lại từ `ZALO_ALLOWED_USERS` khi tệp `.env` đổi — thêm UID là có quyền ngay, không phải khởi động lại (`zalo-owners.js`, `owner-commands.js`, `hermes-plugin/zalo/owner_command.py`).
+- **Hai mức quyền.** Lệnh đọc (`doctor`, `status`, `sessions list`, `skills list/check/search/inspect`, `model list`, `/memory`, `/skills`, `/model`) mọi chủ nhân chạy được. Lệnh đổi máy (`hermes update`, `setup`, `gateway start/setup`, `skills install/update`, `profile create`, `config set`, `model <tên>`) chỉ chủ nhân chính; ai khác gõ thì được trả lời rõ là không có quyền.
+- **Chủ nhân chính phải gõ thêm `xác nhận`** ở cuối câu cho nhóm đổi máy. Cờ này đọc ở sidecar trên chính câu người dùng gửi, nên trợ lý không thể tự thêm hộ — kể cả khi bị thuyết phục qua nội dung tin nhắn.
+- **Lệnh chạy bằng argv, không qua shell** (`buildArgv`), và mọi token/khóa trong `.env` bị thay bằng `***` trước khi gửi kết quả về Zalo (`redactSecrets`). `skills install` luôn thêm `--yes` để không kẹt ở câu hỏi tương tác; `hermes update` và `gateway start` chạy nền để không làm cầu nối chờ.
+- **Lệnh hệ thống của chủ nhân là `owner_command` trong chính sách sidecar**, không phải "admin" chung: kiểm tra lại UID ngay tại thời điểm chạy, nên người ngoài gửi đúng khung cầu nối vẫn bị từ chối (`zalo-policy.js`, `hermes-bridge.js`).
 
 ### Sửa — Hỏi dồn được trả lời lần lượt, đúng câu đúng người
 
