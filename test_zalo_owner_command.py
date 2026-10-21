@@ -52,6 +52,19 @@ class ParseTest(unittest.TestCase):
                 self.assertEqual(parsed.display, display)
                 self.assertEqual(parsed.usage, "")
 
+    def test_silent_va_talk_bat_tat_o_chi_tra_loi_khi_duoc_tag(self):
+        # Bản Zalo không gắn tag cho tin thì câu còn chữ "@Bot" dính liền lệnh — vẫn phải là lệnh chủ nhân.
+        for text in ("/silent", "/SILENT", "@Bot /silent", "@Minh Luan /silent"):
+            with self.subTest(text=text):
+                self.assertEqual(oc.parse(text).command, "tag-off")
+        for text in ("/talk", "@Bot /talk"):
+            with self.subTest(text=text):
+                self.assertEqual(oc.parse(text).command, "tag-on")
+        # /shutup: tạm dừng hội thoại, một chế độ thứ ba bên cạnh tag-off/tag-on.
+        for text in ("/shutup", "/SHUTUP", "@Bot /shutup", "@Minh Luan /shutup"):
+            with self.subTest(text=text):
+                self.assertEqual(oc.parse(text).command, "pause")
+
     def test_remember_can_noi_dung(self):
         parsed = oc.parse("/remember thích cà phê đá")
         self.assertEqual(parsed.command, "remember")
@@ -221,3 +234,59 @@ class BridgeCallTest(unittest.IsolatedAsyncioTestCase):
         result = await oc.run(Denying(), "/new", role="owner")
         self.assertTrue(result["handled"])
         self.assertIn("Chỉ chủ nhân", result["reply"])
+
+
+class GroupAdminCommandTest(unittest.TestCase):
+    """/outgroup và /kick: parser, mức quyền, gói khung gửi cầu nối."""
+
+    def test_outgroup_va_kick_la_lenh_chu_nhan(self):
+        self.assertEqual(oc.parse("/outgroup").command, "outgroup")
+        self.assertEqual(oc.parse("@Bot /outgroup").command, "outgroup")
+        parsed = oc.parse("/kick 6443000000000000002 6443000000000000002 9000000000000000009")
+        self.assertEqual(parsed.command, "kick")
+        self.assertEqual(oc.kick_users(parsed.display), ["6443000000000000002", "9000000000000000009"])
+        # Chỉ có tag (@An) thì adapter đọc ``mentions`` của lượt; ở đây không có UID viết tay.
+        self.assertEqual(oc.kick_users(oc.parse("/kick @An").display), [])
+
+    def test_khong_phai_lenh_doi_may(self):
+        for text in ("/outgroup", "/kick 6443000000000000002"):
+            with self.subTest(text=text):
+                self.assertFalse(oc.parse(text).dangerous)
+
+    def test_confirmed_doc_dung_cau_chu_nhan_go(self):
+        self.assertTrue(oc.confirmed("/kick 6443000000000000002 xác nhận"))
+        self.assertTrue(oc.confirmed("/outgroup xac-nhan"))
+        self.assertTrue(oc.confirmed("/outgroup XAC NHAN"))
+        self.assertFalse(oc.confirmed("/outgroup"))
+
+
+class GroupAdminBridgeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_gui_du_co_xac_nhan_va_tag_that(self):
+        calls = []
+
+        class Bridge:
+            async def owner_group_admin(self, payload, *, timeout=90.0):
+                calls.append(payload)
+                return {"reply": "ok", "handled": True}
+
+        result = await oc.run_group_admin(
+            Bridge(), "/kick xác nhận", role="main", thread_id="group-1", confirmed=True,
+            mentions=[{"uid": "8022000000000000001", "name": "An"}, {"uid": "bot", "name": "Bot"}],
+            users=["6443000000000000002"],
+        )
+        self.assertEqual(result["reply"], "ok")
+        payload = calls[0]
+        self.assertEqual(payload["text"], "/kick xác nhận")
+        self.assertTrue(payload["confirm"])
+        self.assertEqual(payload["threadId"], "group-1")
+        self.assertEqual(payload["users"], ["6443000000000000002"])
+        # Chỉ tag thật đi tiếp; UID phi-Zalo ("bot") bị bỏ — cầu nối tự lọc lần nữa trước khi gọi Zalo.
+        self.assertEqual(payload["mentions"], [{"uid": "8022000000000000001", "name": "An"}])
+
+    async def test_adapter_cu_bao_ro_thay_vi_chay_sai(self):
+        class OldBridge:
+            async def request(self, *args, **kwargs):  # pragma: no cover - không được gọi
+                raise AssertionError("không có cửa mang cờ xác nhận thì không gọi")
+
+        result = await oc.run_group_admin(OldBridge(), "/outgroup", thread_id="group-1")
+        self.assertIn("cập nhật", result["reply"])

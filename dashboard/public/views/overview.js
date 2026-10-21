@@ -264,7 +264,7 @@ function AiUse({ usageDays }) {
   <//>`;
 }
 
-export function Overview({ me, status: s }) {
+export function Overview({ me, status: s, update = null }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState({});
   const admin = me.role === 'admin';
@@ -274,7 +274,7 @@ export function Overview({ me, status: s }) {
   const [sched] = usePoll('/api/schedules', 60_000);
   const [reqs, reloadReqs] = usePoll('/api/contacts/requests', 60_000);
   const [memory] = usePoll('/api/admin/agent-memory', 300_000, admin);
-  const [notice] = usePoll('/api/update-notice', 600_000);
+  const notice = update;
   if (!s) return html`<${PageHead} title="Tổng quan" /><${Spinner} />`;
 
   async function restart() {

@@ -50,6 +50,7 @@ earlier iteration of this integration.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -63,6 +64,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -266,6 +268,38 @@ def _get_scoped_secret(name, default=None):
 
 
 logger = logging.getLogger(__name__)
+
+# Cầu nối (Node) từ bản này trở đi mới hiểu khung ``owner_command`` của plugin; trước đó lệnh trong nhóm
+# (`/silent`, `/talk`) bị chuyển thẳng lên Hermes và ra "Unknown command". Xem ``_log_bridge_capabilities``.
+_CAPABILITY_BRIDGE_VERSION = "2.50.0"
+
+
+def _version_at_least(version: str, floor: str) -> bool:
+    """``1.2.3``-style version comparison; unreadable versions never satisfy the floor."""
+    try:
+        have = tuple(int(part) for part in str(version).strip().lstrip("v").split(".")[:3])
+    except ValueError:
+        return False
+    want = tuple(int(part) for part in str(floor).split(".")[:3])
+    return have + (0,) * (3 - len(have)) >= want + (0,) * (3 - len(want))
+
+
+def _installed_bridge_version() -> Optional[str]:
+    """Version of the bot code on disk — not of the process that is running it.
+
+    Long-lived ``node server.js`` keeps the code it started with, so "the install
+    is new but the process is old" is exactly the case worth warning about. The
+    installer stamps the sidecar's version into ``plugin.yaml`` (``sidecar_version``)
+    when it copies this plugin into ``<HERMES_HOME>``; ``None`` when absent.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        for line in (Path(__file__).resolve().parent / "plugin.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith("sidecar_version:"):
+                stamp = line.split(":", 1)[1].strip().strip("'\"")
+                if stamp:
+                    return stamp
+    return None
+
 
 DEFAULT_BRIDGE_URL = "ws://127.0.0.1:3873"
 # Zalo từ chối tin dài quá 3000 ký tự với lỗi "Nội dung quá dài". Đo bằng phép
@@ -649,6 +683,10 @@ class ZaloAdapter(BasePlatformAdapter):
             logger.debug("[zalo] chưa ghi được mốc cấu hình", exc_info=True)
         self._settings_extra = dict(extra)
 
+        # Danh sách lệnh nhóm cầu nối tự xử lý (`/silent`, `/talk`, `/shutup`), hỏi một lần lúc nối. None = chưa biết;
+        # cầu nối cũ trả [] nên `/shutup` ghi thẳng từ đây (`_pause_here`) thay vì chờ nó "Unknown command".
+        self._bridge_group_commands: Optional[list] = None
+
         self._ws = None
         self._reader_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -709,7 +747,62 @@ class ZaloAdapter(BasePlatformAdapter):
         logger.info("[zalo] connected to sidecar at %s (công cụ: %s)",
                     self._bridge_url, _tools_mod.__name__)
         self._log_permission_selfcheck()
+        await self._log_bridge_capabilities(min_version=_installed_bridge_version() or "")
         return True
+
+    async def bridge_group_commands(self) -> Optional[list]:
+        """Cầu nối đang chạy có biết lệnh trong nhóm không: ``None`` = không trả lời.
+
+        Plugin Python (nạp lại mỗi lần gateway khởi động) và cầu nối Node (tiến trình
+        sống lâu) nâng cấp riêng. Trước bản có ``owner_command``, cầu nối chuyển lệnh
+        gạch chéo thẳng lên Hermes — `/silent` ra "Unknown command" dù plugin đã biết
+        lệnh đó (sự cố 21/10 07:02).
+
+        Ba câu trả lời có thể có, và phải đọc đúng cả ba — sự cố 21/10 07:27: cầu nối
+        mới bị báo nhầm là bản cũ vì mã lỗi nằm ở ``errorCode`` chứ không phải ``code``
+        (cầu nối trả ``{ok: false, errorCode: "unknown_command"}``):
+
+        * ``{ok: true, result: {groupCommands: [...]}}`` — bản có handler, trả lời thẳng.
+        * ``{ok: false, errorCode: "unknown_command"}`` — bản 2.50.0 không có handler
+          nhưng từ chối khung lạ thay vì ok rỗng, tức nó ĐÃ biết lệnh trong nhóm.
+        * ``{ok: true}`` rỗng — bản cũ trả ok cho mọi khung, không phân biệt được gì.
+        """
+        ack = await self._command({"type": "health_details"}, expect_ack=True)
+        if not isinstance(ack, dict):
+            return None
+        result = ack.get("result")
+        if isinstance(result, dict) and isinstance(result.get("groupCommands"), list):
+            return [str(c) for c in result["groupCommands"]]
+        # Cả hai tên field đều có trong tự nhiên: policy cũ trả ``code``, policy mới
+        # và ack chuẩn trả ``errorCode``.
+        code = ack.get("errorCode") or ack.get("code")
+        if code == "unknown_command":
+            return ["/silent", "/talk"]
+        return []
+
+    async def _log_bridge_capabilities(self, *, min_version: str = "") -> None:
+        """Ghi rõ cầu nối đang chạy có hiểu lệnh trong nhóm hay không. Chỉ ồn khi có việc phải làm."""
+        commands = await self.bridge_group_commands()
+        self._bridge_group_commands = commands
+        if commands is None:
+            logger.warning(
+                "[zalo] cầu nối không trả lời: chưa biết `/silent`, `/talk`, `/shutup` có chạy được không.")
+            return
+        if commands:
+            logger.info("[zalo] cầu nối nhận lệnh trong nhóm: %s", ", ".join(commands))
+            if "/shutup" not in commands:
+                logger.warning(
+                    "[zalo] cầu nối chưa có `/shutup`: lệnh này ghi thẳng bên plugin (vẫn chạy), nhưng "
+                    "`/silent`/`/talk` không nhả được ô \"Tạm dừng\" do dashboard đặt. Mở lại cầu nối bằng "
+                    "`npm start` trong thư mục 2anh-zalo-bot để nạp mã mới.")
+            return
+        if min_version and _version_at_least(min_version, _CAPABILITY_BRIDGE_VERSION):
+            logger.warning(
+                "[zalo] cầu nối đang chạy là bản cũ (bản cài %s đã có lệnh trong nhóm): `/silent`, `/talk`, `/shutup` "
+                "sẽ bị chuyển lên Hermes và trả \"Unknown command\". Mở lại cầu nối bằng `npm start` trong thư mục "
+                "2anh-zalo-bot để nạp mã mới.", min_version)
+            return
+        logger.debug("[zalo] cầu nối cũ hơn lệnh trong nhóm — bản cài cũng chưa nâng cấp, bỏ qua.")
 
     async def invoke(self, method: str, args: list, *, confirmed: bool = False) -> Optional[Dict[str, Any]]:
         """Gọi một hàm zca-js qua cầu nối. Dùng bởi các tool trong tools.py."""
@@ -797,6 +890,13 @@ class ZaloAdapter(BasePlatformAdapter):
                         timeout=10,
                     )
                     logger.info("[zalo] reconnected to sidecar")
+                    # Cầu nối có thể vừa được mở lại bằng mã MỚI (sự cố 21/10 09:18: `/shutup` vẫn đi đường cầu
+                    # nối vì cache giữ đáp án của lần khởi động gateway, trong khi tiến trình Node đã đổi). Hỏi
+                    # lại mỗi lần nối lại — rẻ, và chỉ đây mới biết cầu nối đang chạy là bản nào.
+                    try:
+                        await self._log_bridge_capabilities(min_version=_installed_bridge_version() or "")
+                    except Exception:
+                        logger.debug("[zalo] không hỏi lại được lệnh trong nhóm của cầu nối", exc_info=True)
                 except Exception:
                     continue  # stay in the loop and back off again
 
@@ -992,15 +1092,31 @@ class ZaloAdapter(BasePlatformAdapter):
         if group_rules and not group_rules["active"] and not is_owner:
             logger.debug("[zalo] nhóm %s đang tắt trên dashboard — %s chỉ giữ làm ngữ cảnh", thread_id, sender_uid)
             return
+        # `/shutup`: nhóm đang tạm dừng thì bot không đáp bất kỳ tin nào — kể cả tin có tag, kể cả người chủ nhân khác.
+        # Tin vẫn nằm trong ngữ cảnh (ngay trên) nên lúc được gọi lại bot vẫn nhớ chuyện đã xảy ra. Chỉ chủ nhân còn
+        # đi tiếp được: đúng người ấy phải gõ `/silent` hoặc `/talk` để gọi bot lại. Tin riêng của chủ nhân không bị
+        # dừng — "Tạm dừng" là ô của nhóm.
+        paused = bool(group_rules and group_rules.get("paused"))
+        if paused and not is_owner:
+            logger.debug("[zalo] nhóm %s đang tạm dừng (/shutup) — %s chỉ giữ làm ngữ cảnh",
+                         thread_id, sender_uid)
+            return
         reply_only_tagged = self._reply_only_tagged
         if group_rules and group_rules["reply_only_tagged"] is not None:
             reply_only_tagged = group_rules["reply_only_tagged"]
         mentioned = self._is_mentioned(frame, text, is_owner=is_owner)
+        # Chủ nhân đến lệnh nhả "Tạm dừng" trong chính tin này: `/talk` đã tắt ô tag thì phải trả lời ngay, không bắt
+        # gõ thêm câu thứ hai.
+        resume_command = bool(
+            paused and is_owner and is_group
+            and _owner_command.parse(text).command in ("tag-on", "pause")
+        )
         # Trong nhóm: không trả lời khi chưa được gọi, nhưng vẫn giữ tin đó trong
         # rolling memory ở trên để câu tag ngay sau có ảnh/ngữ cảnh gần nhất.
-        if is_group and reply_only_tagged and not mentioned:
+        if is_group and reply_only_tagged and not mentioned and not resume_command:
             logger.debug("[zalo] group message not addressed to the bot — saved as context only")
             return
+
 
         # Nhắn riêng: mặc định chỉ chủ nhân. Cửa vào nhóm mở cho tất cả, nhưng
         # cửa nhắn riêng thì không — một tin nhắn riêng là hội thoại kín, không
@@ -1041,6 +1157,9 @@ class ZaloAdapter(BasePlatformAdapter):
             # (không phải lúc chạy lượt) nên không nhầm người: mỗi tin tới đều
             # tự ghi mã của chính nó.
             "msg_ids": [msg_id] if msg_id else [],
+            # Tag thật của tin này (uid của từng người được tag). `/kick` không có UID viết tay thì phải đọc chỗ này;
+            # gateway gắn lại đúng ``turn`` chứ không giữ khung tin, nên phải mang theo từ đầu.
+            "mentions": frame.get("mentions") if isinstance(frame.get("mentions"), list) else [],
         }
         self._remember_turn(turn)
         _zalo_tools().set_turn_context(**turn)
@@ -1356,12 +1475,110 @@ class ZaloAdapter(BasePlatformAdapter):
                 metadata=metadata,
             )
             return
+        if command.command == "pause" and self._bridge_has_group_commands() is False:
+            # Cầu nối cũ không biết ô "Tạm dừng": ghi thẳng vào permissions.json (cùng tệp, cùng quy tắc như lệnh).
+            # `/silent`/`/talk` vẫn đi đường cầu nối — bản cũ nhả "Tạm dừng" được nếu tệp do dashboard ghi.
+            reply = self._pause_here(thread_id)
+            if reply:
+                await self.send(thread_id, reply, metadata=metadata)
+                return
+        # `/outgroup` và `/kick` đụng thẳng vào tư cách thành viên: tự gắn cờ xác nhận hay không, định danh người cần
+        # mời ra — thứ chữ ``@Tên`` của mô hình không chứng minh được.
+        if command.command in ("outgroup", "kick"):
+            await self._run_group_admin(thread_id, sender_uid, command, is_group=is_group, metadata=metadata)
+            return
         await self.send_typing(thread_id, metadata=metadata)
         result = await _owner_command.run(self, command.display, role=role)
         reply = str(result.get("reply") or "(không có kết quả)")
         if result.get("newSession"):
             await self._rotate_session(thread_id, sender_uid, is_group=is_group)
         await self.send(thread_id, reply, metadata=metadata)
+
+    async def _sender_admins_group(self, thread_id: str, sender_uid: str) -> bool:
+        """Người gõ có phải chủ nhân bot **và** quản trị viên của nhóm này không.
+
+        ``group_members`` của cầu nối trả ``adminIds`` (đã gộp ``creatorId``) đọc thẳng từ Zalo, nên vai trò lấy
+        từ Zalo chứ không từ danh sách cục bộ — người vừa được bổ nhiệm phó nhóm dùng được ngay, người vừa bị gỡ
+        mất quyền ngay. Cầu nối không tra được (rớt, nhóm lạ, Zalo từ chối) thì trả ``False``: thà từ chối một
+        lệnh đúng còn hơn đuổi nhầm người khỏi nhóm.
+        """
+        uid = str(sender_uid or "")
+        if not uid or uid not in _owner_command.owners():
+            return False
+        try:
+            ack = await self.group_members(str(thread_id))
+        except Exception:
+            logger.warning("[zalo] không đọc được quản trị viên nhóm %s", thread_id, exc_info=True)
+            return False
+        # ``group_members`` đi qua ``_command`` nên trả nguyên phong bì ``ack``; danh sách nằm trong ``result``.
+        if not isinstance(ack, dict) or ack.get("ok") is False:
+            return False
+        result = ack.get("result")
+        admins = result.get("adminIds") if isinstance(result, dict) else None
+        return isinstance(admins, list) and uid in {str(a) for a in admins}
+
+    async def _run_group_admin(
+        self, thread_id: str, sender_uid: str, command: "_owner_command.OwnerCommand",
+        *, is_group: bool, metadata: Dict[str, Any],
+    ) -> None:
+        """``/outgroup`` (bot rời nhóm) và ``/kick <tag | userID>`` (mời người ra khỏi nhóm).
+
+        Hai điều kiện, cả hai đều phải đúng: người gõ là **chủ nhân bot** (UID trong ``ZALO_ALLOWED_USERS``) **và**
+        là **quản trị viên của chính nhóm đó** (trong ``adminIds``/``creatorId`` mà Zalo trả về). Đuổi một người là
+        quyền quản trị của nhóm, không phải quyền sở hữu bot — chủ nhân hai bot khác nhóm không đuổi được người của
+        nhóm này, còn quản trị viên nhóm chưa là chủ bot thì cũng không. Cờ xác nhận đọc trên chính câu chủ nhân gõ
+        (như ``/new`` trở đi không có ai tự đặt hộ được) và nhóm lấy từ hội thoại nguồn.
+        """
+        role = _owner_command.role_for(sender_uid) or "owner"
+        if not await self._sender_admins_group(thread_id, sender_uid):
+            await self.send(
+                thread_id,
+                f"🔒 `{command.display}` đụng tới tư cách thành viên trong nhóm nên chỉ chủ nhân bot "
+                "đồng thời là quản trị viên nhóm chạy được.",
+                metadata=metadata,
+            )
+            return
+        if not is_group:
+            await self.send(
+                thread_id,
+                f"`{command.display}` là lệnh của **nhóm** — gõ trong nhóm cần thao tác, kèm chữ `xác nhận`.",
+                metadata=metadata,
+            )
+            return
+        turn = _zalo_tools().current_turn()
+        confirmed = _owner_command.confirmed(str(turn.get("text") or ""))
+        mentions = [m for m in (turn.get("mentions") or []) if isinstance(m, dict)]
+        users = _owner_command.kick_users(command.display)
+        if command.command == "kick" and not mentions and not users:
+            await self.send(thread_id, _owner_command.USAGE["kick"], metadata=metadata)
+            return
+        await self.send_typing(thread_id, metadata=metadata)
+        result = await _owner_command.run_group_admin(
+            self, command.display, role=role, thread_id=thread_id, thread_type=1,
+            confirmed=confirmed, mentions=mentions, users=users,
+        )
+        await self.send(thread_id, str(result.get("reply") or "(không có kết quả)"), metadata=metadata)
+
+    def _pause_here(self, thread_id: str) -> str:
+        """``/shutup`` khi cầu nối đang chạy là bản cũ: ghi ô "Tạm dừng" của nhóm trong permissions.json.
+
+        Trả câu trả lời, hoặc ``""`` khi không ghi được (tin riêng, mã hội thoại lạ) để người gọi đi tiếp đường cầu nối.
+        """
+        perms = _group_permissions()
+        gid = str(thread_id or "")
+        if perms is None or not (gid.isascii() and gid.isdigit()):
+            return ""
+        try:
+            perms.set_group_paused(gid, True)
+        except Exception as exc:
+            return f"⚠️ Không đặt được tạm dừng: {exc}"
+        return ("🤐 Đã tạm dừng bot ở nhóm này — không trả lời bất kỳ tin nào cho tới khi có "
+                "`/silent` hoặc `/talk` gọi lại.")
+
+    def _bridge_has_group_commands(self) -> Optional[bool]:
+        """Cầu nối đang chạy có xử lý lệnh trong nhóm không (``health_details.groupCommands``); ``None`` = chưa biết."""
+        commands = self._bridge_group_commands
+        return None if commands is None else bool(commands)
 
     async def _rotate_session(self, thread_id: str, sender_uid: str, *, is_group: bool) -> bool:
         """Bỏ phiên đang nạp của hội thoại (``/new``), dùng chính đối tượng gateway.
@@ -2525,6 +2742,37 @@ class ZaloAdapter(BasePlatformAdapter):
                 }
             payload = ack.get("result")
             return payload if isinstance(payload, dict) else None
+        return ack
+
+    async def owner_group_admin(self, payload: Dict[str, Any], *, timeout: float = 90.0) -> Optional[Dict[str, Any]]:
+        """``/outgroup`` và ``/kick``: khung quản trị nhóm; ngữ cảnh người gửi do ``_command`` gắn.
+
+        Hội thoại nguồn lấy từ chính payload (nhóm đang nhắn) chứ không đoán từ mã nhóm — cùng một mã có thể là nhóm
+        hay người, còn hai lệnh này chỉ có nghĩa trong nhóm. Cầu nối kiểm lại UID người gửi và cờ xác nhận.
+        """
+        parsed = _owner_command.parse(str(payload.get("text") or ""))
+        if parsed is None or parsed.command not in ("outgroup", "kick"):
+            return {"reply": "⚠️ Cầu nối chưa biết lệnh này — cập nhật mã bot rồi chạy lại `npm start`.", "handled": True}
+        frame: Dict[str, Any] = {
+            "type": parsed.command,
+            "threadId": str(payload.get("threadId") or ""),
+            "threadType": int(payload.get("threadType") or THREAD_GROUP),
+            "users": list(payload.get("users") or []),
+            "mentions": list(payload.get("mentions") or []),
+            # Cờ xác nhận đọc trên câu chủ nhân gõ: cầu nối xét nó ở ``auth.confirmed``, không tự đặt hộ.
+            "_confirmed": bool(payload.get("confirm")),
+        }
+        ack = await self._command(frame, expect_ack=True)
+        if not isinstance(ack, dict):
+            return None
+        if ack.get("type") == "ack":
+            if ack.get("ok") is False:
+                return {
+                    "reply": f"⚠️ Cầu nối từ chối lệnh: {ack.get('error') or ack.get('errorCode') or 'không rõ lý do'}",
+                    "handled": True, "denied": True,
+                }
+            result = ack.get("result")
+            return result if isinstance(result, dict) else None
         return ack
 
     async def group_members(self, chat_id: str) -> Optional[Dict[str, Any]]:

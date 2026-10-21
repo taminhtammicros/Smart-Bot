@@ -160,8 +160,17 @@ export function statusLevel(s) {
   if (s.zalo.listener != null && s.zalo.listener !== 'connected') {
     return { kind: 'warn', icon: 'warn', text: 'Đang nối lại Zalo… — bot tạm thời chưa nhận được tin nhắn. Nếu quá 10 phút vẫn vậy, hãy quét mã đăng nhập lại.' };
   }
+  const load = hostLoad(s.host);
+  if (load) return { kind: 'warn', icon: 'warn', text: `${load} — máy chủ đang tải cao, bot vẫn chạy nhưng có thể chậm. Xem Sức khoẻ máy chủ.` };
   if (s.assistant !== 'connected') return { kind: 'warn', icon: 'warn', text: 'Trợ lý chưa phản hồi — bot nhận tin nhưng chưa trả lời được. Báo người cài đặt nếu kéo dài.' };
   return { kind: 'ok', icon: 'check', text: `Bot đang hoạt động bình thường${s.zalo.displayName ? ` — ${s.zalo.displayName}` : ''}.` };
+}
+
+/** Ba số đo máy chủ vượt 85 % (cùng ngưỡng với thẻ "Cần chú ý" ở Tổng quan), gộp thành câu ngắn; không vượt → ''. */
+export function hostLoad(h) {
+  if (!h) return '';
+  const rows = [['CPU', h.cpuPct], ['RAM', h.ramPct], ['ổ đĩa', h.diskPct]].filter(([, v]) => Number.isFinite(v) && v >= 85);
+  return rows.length ? rows.map(([k, v]) => `${k} ${Math.round(v)}%`).join(', ') : '';
 }
 
 /**
@@ -338,7 +347,7 @@ export function Shell({ me, brand, path }) {
   let body;
   if (!r) body = html`<${Message} icon="info" title="Không tìm thấy trang">Đường dẫn này không có trong dashboard.<//>`;
   else if (r.admin && me.role !== 'admin') body = html`<${Message} icon="shield" title="Không có quyền">Trang này chỉ dành cho Quản trị. Nếu cần, hãy nhờ Quản trị làm giúp.<//>`;
-  else body = html`<${r.view} me=${me} status=${status} refresh=${refresh} />`;
+  else body = html`<${r.view} me=${me} status=${status} refresh=${refresh} update=${update} />`;
   return html`<div class="layout">
     <${Sidebar} me=${me} brand=${brand} path=${path} features=${features} status=${status} update=${update} />
     <div class="main-col">

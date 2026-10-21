@@ -204,7 +204,14 @@ function quoteCommandPath(path) {
 
 export function renderPlatformManifest(template, sidecarRoot) {
   const serverPath = join(resolve(sidecarRoot), 'server.js').replaceAll('\\', '/');
-  return String(template).replaceAll('{{SIDECAR_SERVER}}', serverPath);
+  // Phiên bản mã bot đã cài, đóng dấu vào manifest: plugin ở <HERMES_HOME> không thấy `package.json` của cầu nối,
+  // nhưng cần biết "bản cài" có năng lực mới hơn tiến trình đang chạy hay không (adapter._log_bridge_capabilities).
+  let version = '';
+  try {
+    version = String(JSON.parse(readFileSync(join(resolve(sidecarRoot), 'package.json'), 'utf8')).version || '');
+  } catch { /* thiếu manifest: không đóng dấu, adapter coi như không biết */ }
+  const rendered = String(template).replaceAll('{{SIDECAR_SERVER}}', serverPath);
+  return version ? `${rendered.replace(/\n?$/, '\n')}sidecar_version: ${JSON.stringify(version)}\n` : rendered;
 }
 
 function within(parent, child) {

@@ -683,9 +683,15 @@ Mọi UID trong `ZALO_ALLOWED_USERS` gõ thẳng lệnh Hermes vào khung chat Z
 | `/new` `/reset` `/clear` `/STOP` | mọi chủ nhân | `/STOP` dừng gateway Hermes (bot ngừng trả lời tới khi bật lại) |
 | `/model` `/skills` `hermes model list` `hermes skills list\|check\|search\|inspect\|audit` `hermes doctor` `hermes gateway status` `hermes sessions list\|resume` `hermes profile list` `hermes --profile <tên> <lệnh đọc>` | mọi chủ nhân | chỉ đọc; kết quả gửi về dạng chữ, token/khoá bị ẩn |
 | `/memory` `/remember <nội dung>` | mọi chủ nhân | đọc và thêm vào trí nhớ dài hạn của trợ lý |
+| `/silent` `/talk` | mọi chủ nhân, gõ trong nhóm | bật/tắt ô "Chỉ trả lời khi được tag" của **chính nhóm đó** (dashboard › Phân quyền Bot); áp dụng từ tin kế tiếp, không cần khởi động lại |
+| `/shutup` | mọi chủ nhân, gõ trong nhóm | tắt hẳn bot ở **chính nhóm đó**: không đáp tin nào (kể cả tin có tag) cho tới khi chủ nhân gõ `/silent` hoặc `/talk` để gọi lại; nút "Tạm dừng" ở dashboard › Phân quyền Bot. Tin nhắn riêng của chủ nhân vẫn được trả lời |
+| `/outgroup` | **chỉ chủ nhân chính**, gõ trong nhóm, kèm `xác nhận` (vd. `/outgroup xác nhận`) | bot rời hẳn **chính nhóm đó**; gõ ở tin nhắn riêng thì bot nhắc gõ trong nhóm |
+| `/kick <tag \| userID>` | **chỉ chủ nhân chính**, gõ trong nhóm, kèm `xác nhận` (vd. `/kick @Tên xác nhận` hoặc `/kick 12345678901234567 xác nhận`) | mời người đó ra khỏi **chính nhóm đó**. Tag thật lấy từ tin chủ nhân gửi (không phải chữ `@Tên` trợ lý gõ), nên tag đúng người là đủ; nhiều tag/UID trong một câu thì mời cả lượt. Người đã ra nhóm thì bỏ qua và vẫn mời người còn lại; bot không tự mời chính mình (dùng `/outgroup`) |
 | `hermes update` `hermes setup` `hermes gateway start\|setup` `hermes skills install\|update` `hermes profile create` `hermes config set security.*` `hermes model <tên>` | **chỉ chủ nhân chính**, và phải gõ thêm chữ `xác nhận` ở cuối câu (vd. `hermes update xác nhận`) | đổi cấu hình máy; chữ xác nhận được sidecar đối chiếu trên chính tin người dùng gửi, nên trợ lý không thể tự thêm hộ |
 
 Lệnh chạy bằng argv (không qua shell); lệnh lâu (`update`, `gateway start`) chạy nền; token/khoá lẫn trong kết quả được thay bằng `***`.
+
+Lệnh trong nhóm do **cầu nối** (tiến trình `npm start`) thực thi, không do plugin Python: nâng cấp mã bot xong phải mở lại cầu nối, nếu không `/silent`, `/talk`, `/shutup`, `/outgroup` và `/kick` vẫn bị chuyển lên Hermes và trả "Unknown command". Ngay sau khi nối, adapter tự thử một khung mới (`health_details`): cầu nối hiểu lệnh ghi `[zalo] cầu nối nhận lệnh trong nhóm: /silent, /talk, /shutup, /outgroup, /kick`; cầu nối chưa có `/shutup` thì lệnh đó vẫn chạy (plugin tự ghi) nhưng có một dòng cảnh báo; cầu nối cũ hơn hẳn ghi cảnh báo kèm bản cài (`sidecar_version` trong `plugin.yaml`) để biết chỉ cần mở lại `npm start`.
 
 Lệnh gạch chéo gốc của Hermes (`/new`, `/clear`, `/reset`, `/stop`, `/compress`, `/model`…) chỉ chủ nhân chạy được; người khác gõ thì nhận câu chặn bằng tiếng Việt. Người ngoài chỉ còn `/help`, `/whoami`, `/status`, `/context`.
 

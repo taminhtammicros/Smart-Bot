@@ -150,6 +150,37 @@ class ZaloAdapterMediaContextTest(unittest.IsolatedAsyncioTestCase):
             ["https://example.com/photo.jpg"],
         )
 
+    async def test_paused_group_answers_nobody_but_owner_resume_command(self):
+        """/shutup: nhóm đang "Tạm dừng" thì bot không đáp ai (kể cả tin có tag); chủ nhân gõ /silent là nói lại."""
+        adapter = self.make_adapter()
+        handled = []
+
+        async def handle(event):
+            handled.append(event)
+
+        adapter.handle_message = handle
+        # Quyền nhóm giả: paused do /shutup đặt, ô tag đang bật (mọi tin thường đều không có tag).
+        rules = {"active": True, "reply_only_tagged": True, "paused": True, "features": {},
+                 "soul_reminder": "", "custom": True}
+        owners = {"5736877140444221354"}
+        frame = {
+            "type": "message", "threadId": "g1", "threadType": zalo_adapter.THREAD_TYPE_GROUP,
+            "mentions": [{"uid": "bot-uid"}], "text": "@Lăng Tiêu tóm tắt giúp",
+        }
+        with patch.object(adapter, "_group_rules", return_value=rules), \
+                patch.object(adapter, "_is_owner", side_effect=lambda uid: str(uid) in owners), \
+                patch.object(zalo_adapter, "_zalo_tools", return_value=DummyZaloTools()):
+            await adapter._on_message({**frame, "id": "p1", "senderUid": "u1", "senderName": "Yến"})
+            await adapter._on_message({**frame, "id": "p2", "senderUid": "5736877140444221354",
+                                       "senderName": "Chủ nhân", "text": "/silent", "mentions": []})
+
+        # Tin bị dừng vẫn nằm trong ngữ cảnh; tin /silent của chủ nhân chạy lệnh, không thành lượt chat.
+        self.assertEqual(handled, [])
+        self.assertEqual(
+            [entry["sender_uid"] for entry in adapter._recent_group_messages["g1"]],
+            ["u1", "5736877140444221354"],
+        )
+
     async def test_later_mentioned_context_question_attaches_recent_image(self):
         adapter = self.make_adapter()
         handled = []
@@ -2102,6 +2133,107 @@ class ZaloAdapterMediaContextTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handled[0].text, "em tên gì\n\nkhi ai hỏi em là ai: hãy nói em là HÀN TÍN nhé")
 
 
+class BridgeGroupCommandProbeTest(unittest.IsolatedAsyncioTestCase):
+    """Nâng cấp lệch giữa plugin Python và cầu nối Node phải hiện trong nhật ký.
+
+    Sự cố 21/10 07:02: plugin đã có ``/silent`` nhưng cầu nối đang chạy là bản cũ:
+    chữ lệnh bị chuyển tiếp lên Hermes và nhận "Unknown command /silent". Luồng Zalo
+    của adapter chặn lệnh gạch chéo trước khi tới gateway, nên phép thử một khung
+    lạ ngay sau khi nối là chỗ duy nhất phát hiện được lệch phiên bản.
+    """
+
+    def make_adapter(self, ack):
+        adapter = zalo_adapter.ZaloAdapter(
+            PlatformConfig(enabled=True, extra={"bridge_url": "ws://127.0.0.1:9", "bridge_token": "t"})
+        )
+        sent = []
+
+        async def fake_command(payload, *, expect_ack):
+            sent.append(payload)
+            return ack
+
+        adapter._command = fake_command
+        return adapter, sent
+
+    async def test_bridge_that_answers_the_probe_reports_group_commands(self):
+        """``result.groupCommands`` = cầu nối bản mới, trả lời thẳng thay vì để plugin đoán từ mã lỗi."""
+        adapter, sent = self.make_adapter({
+            "type": "ack", "ok": True,
+            "result": {"groupCommands": ["/silent", "/talk", "/shutup"], "zalo": {"status": "logged-in"}},
+        })
+        with self.assertNoLogs("plugins.platforms.zalo.adapter", level="WARNING"):
+            await adapter._log_bridge_capabilities()
+        self.assertEqual(sent, [{"type": "health_details"}])
+        self.assertTrue(adapter._bridge_has_group_commands())
+
+    async def test_bridge_without_shutup_still_lists_commands_but_warns(self):
+        """Cầu nối kiểu 2.50 chưa biết ``/shutup``: lệnh vẫn chạy (plugin ghi thẳng) nhưng nhả tạm dừng thì thiếu."""
+        adapter, _ = self.make_adapter({
+            "type": "ack", "ok": True, "result": {"groupCommands": ["/silent", "/talk"]},
+        })
+        with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING") as logs:
+            await adapter._log_bridge_capabilities()
+        text = "\n".join(logs.output)
+        self.assertIn("/shutup", text)
+        self.assertIn("npm start", text)
+
+    async def test_bridge_that_rejects_unknown_frames_understands_group_commands(self):
+        """Trả ``errorCode: unknown_command`` cho khung thử = cầu nối đã biết lệnh gạch chéo của plugin.
+
+        Sự cố 21/10 07:27: mã lỗi nằm ở ``errorCode`` (ack chuẩn), không phải ``code``, nên cầu nối
+        mới bị báo nhầm là bản cũ ngay sau khi khởi động lại Hermes.
+        """
+        adapter, sent = self.make_adapter({"type": "ack", "ok": False, "errorCode": "unknown_command", "error": "x"})
+        # Cầu nối bản 2.50 hiểu lệnh nhóm nhưng chưa có `/shutup`: đúng một cảnh báo nói thiếu lệnh nào.
+        with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING") as logs:
+            await adapter._log_bridge_capabilities()
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("/shutup", logs.output[0])
+        self.assertEqual(sent, [{"type": "health_details"}])
+
+    async def test_legacy_code_field_is_still_understood(self):
+        """Policy cũ trả ``code`` — đọc được cả hai tên field, không chỉ tên đã biết."""
+        adapter, _ = self.make_adapter({"type": "ack", "ok": False, "code": "unknown_command", "error": "x"})
+        with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING"):
+            await adapter._log_bridge_capabilities()
+        self.assertEqual(await adapter.bridge_group_commands(), ["/silent", "/talk"])
+
+    async def test_old_bridge_warns_that_silent_will_not_work(self):
+        """``{ok: true}`` rỗng cho khung thử = bản chưa có ``owner_command``, đúng ca sự cố 07:02."""
+        adapter, _ = self.make_adapter({"type": "ack", "ok": True})
+        with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING") as logs:
+            await adapter._log_bridge_capabilities(min_version="2.50.0")
+        text = "\n".join(logs.output)
+        self.assertIn("bản cũ", text)
+        self.assertIn("/silent", text)
+        self.assertIn("npm start", text)
+
+    async def test_silent_bridge_is_reported_as_unknown_not_as_failure(self):
+        adapter, _ = self.make_adapter(None)
+        with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING") as logs:
+            await adapter._log_bridge_capabilities()
+        self.assertIn("không trả lời", "\n".join(logs.output))
+
+    async def test_warning_names_the_restart_when_the_install_is_already_current(self):
+        """Bản cài đã có ``owner_command`` nhưng tiến trình đang chạy là bản cũ: nhắc đúng việc cần làm."""
+        adapter, _ = self.make_adapter({"type": "ack", "ok": True})
+        with patch.object(zalo_adapter, "_installed_bridge_version", return_value="2.50.0"):
+            with self.assertLogs("plugins.platforms.zalo.adapter", level="WARNING") as logs:
+                await adapter._log_bridge_capabilities(min_version="2.50.0")
+        text = "\n".join(logs.output)
+        self.assertIn("2.50.0", text)
+        self.assertIn("Mở lại", text)
+
+    async def test_stays_quiet_when_nobody_has_upgraded_the_bridge_yet(self):
+        """Cài đặt còn cũ: lệch này không phải chuyện của tiến trình đang chạy — không làm ồn nhật ký."""
+        adapter, _ = self.make_adapter({"type": "ack", "ok": True})
+        with patch.object(zalo_adapter, "_installed_bridge_version", return_value="2.49.0"):
+            with self.assertNoLogs("plugins.platforms.zalo.adapter", level="WARNING"):
+                await adapter._log_bridge_capabilities(min_version="2.49.0")
+
+
+
+
 class BusyStatusFilterTest(unittest.TestCase):
     """Câu báo bận tiếng Anh của gateway không lọt vào Zalo (thay cho sửa lõi gateway/run.py)."""
 
@@ -2130,7 +2262,7 @@ class ZaloToolSchemaTest(unittest.TestCase):
             zalo_tools.TOOLSET_PUBLIC, zalo_tools.TOOLSET_OWNER, zalo_tools.TOOLSET_CRON,
         })
         self.assertEqual(assignments.count(zalo_tools.TOOLSET_PUBLIC), 27)
-        self.assertEqual(assignments.count(zalo_tools.TOOLSET_OWNER), 41)
+        self.assertEqual(assignments.count(zalo_tools.TOOLSET_OWNER), 42)
         self.assertEqual(assignments.count(zalo_tools.TOOLSET_CRON), 1)
 
     def test_zalo_ids_remain_strings_through_hermes_argument_coercion(self):
@@ -3588,6 +3720,100 @@ class AttachmentDownloadTimeoutTests(unittest.IsolatedAsyncioTestCase):
             path = await zalo_adapter.cache_image_from_url("https://photo-stal-10.zdn.vn/gr/jpg/a/b.jpg")
         self.assertEqual(path, "/cache/img.jpg")
         cache.assert_called_once_with(b"\xff\xd8\xff anh")
+
+
+class ZaloGroupAdminCommandTest(unittest.IsolatedAsyncioTestCase):
+    """``/outgroup`` và ``/kick``: chủ nhân bot **kiêm** quản trị viên nhóm, cần chữ xác nhận, tag thật từ tin."""
+
+    OWNER = "8022000000000000001"
+    OTHER_OWNER = "6443000000000000002"
+    MEMBER = "9000000000000000009"
+    STRANGER = "9000000000000000077"
+
+    def make_adapter(self, admins=None):
+        adapter = zalo_adapter.ZaloAdapter(
+            PlatformConfig(enabled=True, extra={"bridge_url": "ws://127.0.0.1:9", "ack_gestures": False})
+        )
+        adapter._self_profile = {"user_id": "bot-uid", "display_name": "Lăng Tiêu"}
+        adapter._flood.check = lambda _uid: None
+        # Vai trò quản trị đọc từ Zalo, không từ danh sách cục bộ: cầu nối trả ``adminIds`` của nhóm.
+        roster = [self.OWNER] if admins is None else list(admins)
+
+        async def group_members(chat_id):
+            return {"type": "ack", "ok": True, "result": {"total": 3, "adminIds": roster, "members": []}}
+
+        adapter.group_members = group_members
+        return adapter
+
+    async def run_command(self, text, *, sender=OWNER, mentions=None, thread_type=zalo_adapter.THREAD_TYPE_GROUP,
+                          admins=None):
+        adapter = self.make_adapter(admins)
+        sent = []
+
+        async def send(thread_id, message, metadata=None, **kwargs):
+            sent.append(str(message))
+
+        adapter.send = send
+        adapter.send_typing = lambda *args, **kwargs: asyncio.sleep(0)
+        calls = []
+
+        async def run_group_admin(_bridge, command, **kwargs):
+            calls.append((command, kwargs))
+            return {"reply": "đã chạy", "handled": True}
+
+        # Lượt agent thật đã được adapter gắn trước khi lệnh chạy: chữ gốc chủ nhân gõ và tag thật của tin
+        # nằm ở đó, không nằm trong câu lệnh đã cắt.
+        tools = zalo_tools
+        tools.set_turn_context(
+            sender_uid=sender, thread_id="g1", is_group=thread_type == zalo_adapter.THREAD_TYPE_GROUP,
+            is_owner=True, text=text, msg_id="m1", mentions=mentions or [],
+        )
+        env = {"ZALO_ALLOWED_USERS": f"{self.OWNER},{self.OTHER_OWNER}", "ZALO_MAIN_OWNER": self.OWNER}
+        try:
+            with patch.dict(os.environ, env, clear=False), \
+                    patch.object(zalo_adapter._owner_command, "run_group_admin", run_group_admin):
+                await adapter._run_owner_command(
+                    "g1", sender, zalo_adapter._owner_command.parse(text), is_group=thread_type == 1,
+                )
+        finally:
+            tools.bind_turn(None)
+        return sent, calls
+
+    async def test_chu_nhan_chinh_go_lenh_va_tag_di_kem(self):
+        sent, calls = await self.run_command("/kick @An xác nhận", mentions=[{"uid": self.MEMBER, "name": "An"}])
+        self.assertEqual(sent, ["đã chạy"])
+        command, kwargs = calls[0]
+        self.assertEqual(command, "/kick")
+        self.assertTrue(kwargs["confirmed"])
+        self.assertEqual(kwargs["thread_id"], "g1")
+        self.assertEqual(kwargs["thread_type"], 1)
+        self.assertEqual(kwargs["mentions"], [{"uid": self.MEMBER, "name": "An"}])
+
+    async def test_thieu_chu_xac_nhan_thi_cau_lenh_di_tiep_de_cau_noi(self):
+        _sent, calls = await self.run_command("/outgroup")
+        self.assertFalse(calls[0][1]["confirmed"])
+
+    async def test_kick_khong_co_uid_va_khong_co_tag_tra_cu_phap(self):
+        sent, calls = await self.run_command("/kick xác nhận")
+        self.assertEqual(calls, [])
+        self.assertIn("/kick <userID>", sent[0])
+
+    async def test_chu_nhan_bot_khong_phai_quan_tri_vien_thi_khong_duoc_duoi_nguoi(self):
+        """Quyền đuổi người là quyền của nhóm: ``OWNER`` thứ hai của bot không được gì khi không quản trị ``g1``."""
+        sent, calls = await self.run_command("/outgroup xác nhận", sender=self.OTHER_OWNER, admins=[self.OWNER])
+        self.assertEqual(calls, [])
+        self.assertIn("quản trị viên nhóm", sent[0])
+
+    async def test_quan_tri_vien_nhom_khong_phai_chu_nhan_bot_thi_khong_duoc_duoi_nguoi(self):
+        """Thành viên được bổ nhiệm phó nhóm nhưng chưa là chủ bot thì không mượn được tay bot."""
+        sent, calls = await self.run_command("/outgroup xác nhận", sender=self.STRANGER, admins=[self.STRANGER])
+        self.assertEqual(calls, [])
+        self.assertIn("quản trị viên nhóm", sent[0])
+
+    async def test_tin_rieng_bao_go_trong_nhom(self):
+        sent, calls = await self.run_command("/outgroup xác nhận", thread_type=0)
+        self.assertEqual(calls, [])
+        self.assertIn("lệnh của **nhóm**", sent[0])
 
 
 if __name__ == "__main__":

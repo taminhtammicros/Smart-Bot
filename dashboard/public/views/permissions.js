@@ -22,7 +22,7 @@ export const CALL_KEY = 'call';
 export const BULK_KEY = 'bulk';
 // Thư mục nhóm: khoá chọn `f:<mã>` (mã nhóm Zalo luôn là số nên không trùng).
 export const FOLDER_PREFIX = 'f:';
-const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, features: { ...s.features },
+const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, paused: s.paused, features: { ...s.features },
   studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null,
   soulReminder: s.soulReminder || '' });
 // Hạn mức theo nhóm/thư mục: lượt xưởng, ảnh AI, video AI (null = theo lớp trên).
@@ -68,13 +68,14 @@ export function mergeGroups(groups, perms) {
 }
 
 export function sameSettings(a, b) {
-  return a.active === b.active && a.replyOnlyTagged === b.replyOnlyTagged && sameBools(a.features, b.features)
-    && sameBools(a.studio, b.studio) && sameQuotas(a, b) && (a.soulReminder || '') === (b.soulReminder || '');
+  return a.active === b.active && a.replyOnlyTagged === b.replyOnlyTagged && Boolean(a.paused) === Boolean(b.paused)
+    && sameBools(a.features, b.features)
 }
 
 /** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, từng tính năng, từng nút xưởng, số lượt, lời nhắc riêng. */
 export function changeCount(a, b) {
-  let n = (a.active !== b.active) + (a.replyOnlyTagged !== b.replyOnlyTagged) + QUOTA_KEYS.filter((k) => (a[k] ?? null) !== (b[k] ?? null)).length;
+  let n = (a.active !== b.active) + (a.replyOnlyTagged !== b.replyOnlyTagged) + (Boolean(a.paused) !== Boolean(b.paused))
+    + QUOTA_KEYS.filter((k) => (a[k] ?? null) !== (b[k] ?? null)).length;
   if ((a.soulReminder || '') !== (b.soulReminder || '')) n += 1;
   for (const k of Object.keys({ ...a.features, ...b.features })) if (a.features[k] !== b.features[k]) n += 1;
   for (const k of Object.keys({ ...a.studio, ...b.studio })) if (a.studio?.[k] !== b.studio?.[k]) n += 1;
@@ -84,6 +85,7 @@ export function changeCount(a, b) {
 /** Thân PUT của nhóm/mặc định: nút xưởng chỉ gửi khi đủ khoá; số lượt chỉ có ở nhóm. */
 export function settingsPayload(d, { isGroup, studioFeatures = [], policy, previous = {} }) {
   const body = { active: d.active, replyOnlyTagged: d.replyOnlyTagged, features: { ...d.features } };
+  if (isGroup) body.paused = Boolean(d.paused);
   if (studioComplete(d.studio, studioFeatures)) body.studio = applyPolicy(d.studio, policy);
   if (isGroup) for (const k of QUOTA_KEYS) body[k] = d[k] ?? null;
   // Lời nhắc riêng chỉ có nghĩa với nhóm; "Mặc định" dùng ô ZALO_SOUL_REMINDER ở trang Cấu hình.
@@ -175,6 +177,9 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
           more="Bot vẫn đọc tin để hiểu ngữ cảnh khi chủ nhân hỏi. Việc hẹn giờ do thành viên tạo không còn gửi tin chữ vào nhóm đang tắt; muốn dừng hẳn, nhờ chủ nhân xoá việc đó. Việc chủ nhân hẹn vẫn gửi." />
         <${Toggle} id=${`${p}-tag`} checked=${draft.replyOnlyTagged} onChange=${(v) => set({ replyOnlyTagged: v })} label="Chỉ trả lời khi được tag"
           hint="Tắt thì bot trả lời mọi tin trong nhóm." />
+        ${isGroup ? html`<${Toggle} id=${`${p}-paused`} checked=${Boolean(draft.paused)} onChange=${(v) => set({ paused: v })} label="Tạm dừng (/shutup)"
+          hint="Bật thì bot không đáp bất kỳ tin nào trong nhóm, kể cả tin có tag."
+          more="Chỉ chủ nhân còn gõ được lệnh: /silent hoặc /talk gọi bot lại (luôn nhả tạm dừng). Tin trong lúc tạm dừng vẫn được giữ làm ngữ cảnh để lúc được gọi lại bot trả lời đúng mạch." />` : null}
       </div>
     </fieldset>
     ${draft.active ? null : html`<${Notice} kind="info">Nhóm đang tắt nên các tính năng dưới đây chưa dùng tới. Bật "Hoạt động" ở trên để chỉnh.<//>`}
@@ -278,7 +283,7 @@ function BulkGroups({ picked, list, features, studioFeatures, studioPolicy, fold
     </fieldset>
     <fieldset class="perm-box">
       <legend>Cách bot trả lời</legend>
-      <div class="perm-grid">${row('active', 'Hoạt động')}${row('replyOnlyTagged', 'Chỉ trả lời khi được tag')}</div>
+      <div class="perm-grid">${row('active', 'Hoạt động')}${row('replyOnlyTagged', 'Chỉ trả lời khi được tag')}${row('paused', 'Tạm dừng')}</div>
     </fieldset>
     <fieldset class="perm-box">
       <legend>Tính năng cho thành viên</legend>

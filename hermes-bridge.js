@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import { ThreadType, Reactions } from 'zca-js';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { formatAndChunkZaloMarkdown } from './markdown-formatter.js';
 import { createMemberDirectory, findMentions } from './zalo-mentions.js';
@@ -11,12 +12,15 @@ import { RateLimiter, RateLimitedError, THROTTLED_METHODS } from './rate-limiter
 import { openZaloStore } from './zalo-store.js';
 import { authorizeBridgeCommand } from './zalo-policy.js';
 import { createOwnerDirectory } from './zalo-owners.js';
-import { createOwnerCommandRunner } from './owner-commands.js';
+import { createOwnerCommandRunner, parseOwnerCommand, setGroupReplyMode } from './owner-commands.js';
 import { readWelcomeConfig, updateWelcomeGroup } from './zalo-welcome.js';
 import { friendToolsEnabled, getActiveFriendManager } from './zalo-friends.js';
 import { quoteForAsk } from './zalo-reply-anchor.js';
 
 const FRIEND_TOOLS_OFF = 'Tính năng kết bạn đang tắt — bật ZALO_FRIEND_TOOLS=true trong .env của Hermes';
+
+/** Lệnh gạch chéo cầu nối này tự xử lý trong nhóm (không đẩy lên Hermes) — plugin đọc danh sách này lúc nối. */
+const GROUP_COMMANDS = ['/silent', '/talk', '/shutup', '/outgroup', '/kick'];
 
 /**
  * Cầu nối Zalo ↔ Hermes Agent.
@@ -74,6 +78,99 @@ export async function fetchGroupMembers(api, groupId) {
       displayName: profiles[id]?.displayName || profiles[id]?.zaloName || '',
     })),
   };
+}
+
+/**
+ * `/outgroup`: bot rời hẳn nhóm. Zalo trả mã 166 khi bot không còn trong nhóm — coi là việc đã xong, vì người gõ
+ * chỉ cần kết quả cuối cùng là "bot không còn ở đây".
+ */
+export async function leaveGroupHere(api, groupId) {
+  const id = String(groupId || '');
+  if (!id) return { reply: '⚠️ Không biết nhóm nào để rời.', handled: false };
+  try {
+    await api.leaveGroup(id, false);
+  } catch (err) {
+    const code = Number(err?.code);
+    if (code === 166) {
+      return { reply: '🚪 Bot không còn ở nhóm này — không phải làm gì thêm.', handled: true };
+    }
+    return { reply: `⚠️ Không rời được nhóm: ${err?.message || err}`, handled: false };
+  }
+  return { reply: '🚪 Bot đã rời nhóm này. Không cần thì đừng mời lại nhé.', handled: true };
+}
+
+/**
+ * `/kick <tag | userID>`: mời người ra khỏi chính nhóm đang nhắn.
+ *
+ * Tag thật đi trong `mentions` (uid Zalo gắn cho từng chỗ tag), UID viết tay trong `users`. Người không còn trong
+ * nhóm (mã 165) không làm hỏng cả lượt: đánh dấu "bỏ qua" và vẫn mời những người còn lại. Bot tự mời chính mình thì
+ * từ chối trước khi gọi Zalo — người gõ muốn cái đó thì đã có `/outgroup`.
+ */
+export async function kickMembersHere(api, {
+  threadId, threadType, users = [], mentions = [], selfUid = '',
+}) {
+  const id = String(threadId || '');
+  if (Number(threadType) !== 1) {
+    return { reply: '👢 `/kick` mời người ra khỏi **nhóm** — gõ lệnh này trong nhóm, kèm tag người cần mời ra.', handled: false };
+  }
+  const self = String(selfUid || '');
+  const targets = [];
+  const seen = new Set();
+  let taggedSelfTag = false;
+  for (const raw of [...mentions, ...users]) {
+    // Tag của chính bot: uid trong ``mentions`` là mã TÀI KHOẢN Zalo, còn ``selfUid`` là mã phiên chat của bot —
+    // hai mã khác nhau, nên nhãn "Bot" của tag mới là thứ nhận ra được. Dúng thì không mạo hiểm mời bot khỏi nhóm.
+    if (raw && typeof raw === 'object' && /^bot$/i.test(String(raw.name ?? '').trim())) {
+      taggedSelfTag = true;
+      continue;
+    }
+    const uid = String(raw && typeof raw === 'object' ? raw.uid : raw ?? '').trim();
+    if (!/^\d{5,24}$/.test(uid) || seen.has(uid)) continue;
+    seen.add(uid);
+    targets.push(uid);
+  }
+  const myself = self ? targets.filter((uid) => uid === self) : [];
+  const others = self ? targets.filter((uid) => uid !== self) : targets;
+  const selfTagged = myself.length > 0 || taggedSelfTag;
+  if (!others.length) {
+    return {
+      reply: selfTagged
+        ? '👢 Bot không tự mời chính mình — muốn rời nhóm thì gõ `/outgroup`.'
+        : '👢 Chưa biết mời ai. Gõ `/kick` rồi **tag** người đó, hoặc `/kick <userID>`.',
+      handled: false,
+    };
+  }
+  const done = [];
+  const skipped = [];
+  let failed = null;
+  try {
+    await api.removeUserFromGroup(others, id);
+    done.push(...others);
+  } catch (err) {
+    // Mời cả lô mà một người đã ra nhóm thì Zalo từ chối cả lô: mời lại từng người để người còn lại vẫn được mời.
+    for (const uid of others) {
+      try {
+        await api.removeUserFromGroup([uid], id);
+        done.push(uid);
+      } catch (one) {
+        if (Number(one?.code) === 165) skipped.push(uid);
+        else failed = one;
+      }
+    }
+  }
+  const lines = [];
+  if (done.length) lines.push(`👢 Đã mời ${done.length} người ra khỏi nhóm: ${done.join(', ')}.`);
+  if (skipped.length) lines.push(`Người này không còn trong nhóm: ${skipped.join(', ')}.`);
+  if (failed) {
+    const lost = others.filter((uid) => !done.includes(uid) && !skipped.includes(uid)).join(', ');
+    // Mã 166 là Zalo nói bot không có quyền đuổi người trong nhóm này — luôn vì bot chưa được bổ nhiệm phó nhóm,
+    // không phải vì lệnh sai. Nói thẳng việc cần làm thay vì để chủ nhân đi tìm nguyên nhân trong cấu hình bot.
+    lines.push(Number(failed?.code) === 166
+      ? `⚠️ Không mời được ${lost}: bot chưa được bổ nhiệm **phó nhóm** ở nhóm này nên Zalo không cho đuổi người. Vào Zalo › nhóm › Thành viên › chọn bot › Bổ nhiệm phó nhóm rồi gõ lại lệnh.`
+      : `⚠️ Không mời được ${lost}: ${failed?.message || failed}`);
+  }
+  if (selfTagged) lines.push('Bot không tự mời chính mình — muốn rời nhóm thì gõ `/outgroup`.');
+  return { reply: lines.join('\n'), handled: done.length > 0 || skipped.length > 0, kicked: done, skipped };
 }
 
 // Tra thành viên để gắn tag nằm ngay trên đường gửi câu trả lời: treo quá lâu
@@ -186,9 +283,61 @@ let staleTimer = null;
 // Chạy lệnh chủ nhân (owner-commands.js): mức 'main' hay 'owner' do plugin
 // Python chọn theo ZALO_MAIN_OWNER; sidecar kiểm lại UID rồi mới chạy.
 let ownerCommandRunner = createOwnerCommandRunner({ env: () => process.env });
+let threading = { threadId: '', threadType: null };
 export function runOwnerCommand(text, role = null) {
+  // `/silent`, `/talk`, `/shutup`: ô "Chỉ trả lời khi được tag" / "Tạm dừng" của chính hội thoại đang nhắn — cùng tệp
+  // quyền dashboard ghi (permissions.json), plugin đọc lại mỗi tin. Chạy ở đây chứ không trong tiến trình CLI: chỉ
+  // khung lệnh này biết hội thoại nguồn. `threadType` 1 = nhóm.
+  const parsed = parseOwnerCommand(text);
+  const command = parsed?.run?.command;
+  if (command === 'tag-off' || command === 'tag-on' || command === 'pause') {
+    return Promise.resolve(applyGroupReplyMode(command, threading));
+  }
   return ownerCommandRunner(text, role);
 }
+
+/** Khung lệnh vừa tới mang hội thoại nguồn — dùng cho lệnh đụng tới đúng nhóm đang nói. */
+export function setOwnerCommandThread(thread) {
+  threading = { threadId: String(thread?.threadId ?? ''), threadType: thread?.threadType == null ? null : Number(thread.threadType) };
+}
+
+/**
+ * Ba chế độ: `/shutup` đặt ô "Tạm dừng" (bot im hẳn, người ngoài gọi cũng không đáp — chỉ chủ nhân còn nói được, vì
+ * chủ nhân phải gõ được `/silent`/`/talk` để gọi bot lại); `/silent` và `/talk` nhả "Tạm dừng" rồi đặt ô tag như cũ.
+ * Tin riêng không có "ô tag": chỉ `/shutup` có nghĩa, và chỉ dành cho nhóm.
+ */
+function applyGroupReplyMode(command, { threadId, threadType }) {
+  const group = Number(threadType) === 1;
+  const id = String(threadId || '');
+  const display = command === 'pause' ? '/shutup' : command === 'tag-off' ? '/silent' : '/talk';
+  if (!group && command === 'pause') {
+    return { reply: '🤐 `/shutup` chỉ dùng trong nhóm — nhắn riêng thì bot vẫn trả lời chủ nhân.', handled: false, display };
+  }
+  if (!/^\d{1,32}$/.test(id)) {
+    return { reply: `🔇 \`${display}\` đặt ô "Chỉ trả lời khi được tag" cho **nhóm đang nhắn** — gõ trong nhóm ấy.`, handled: true, display };
+  }
+  const env = process.env;
+  const file = String(env.ZALO_PERMISSIONS_FILE || '').trim()
+    || (env.HERMES_HOME ? join(env.HERMES_HOME, 'zalo', 'permissions.json') : '');
+  if (!file) return { reply: '⚠️ Thiếu HERMES_HOME — không biết tệp quyền của bot ở đâu.', handled: true, display };
+  try {
+    if (command === 'pause') {
+      // Thư mục đang đặt "Tạm dừng": một khoá `false` của nhóm là đủ để nhả (plugin: lớp riêng thắng lớp trên).
+      setGroupReplyMode(file, id, { paused: true });
+    } else {
+      setGroupReplyMode(file, id, { tagged: command === 'tag-off', resume: true });
+    }
+  } catch (err) {
+    return { reply: `⚠️ Không đổi được: ${err?.message || err}`, handled: true, display };
+  }
+  const reply = command === 'pause'
+    ? '🤐 Đã tạm dừng bot ở hội thoại này — không trả lời bất kỳ tin nào cho tới khi có `/silent` hoặc `/talk` gọi lại.'
+    : command === 'tag-off'
+      ? '🔇 Đã bật "Chỉ trả lời khi được tag" cho nhóm này — bot im tới khi được gọi tên. Gõ `/talk` để trả lời lại mọi tin, `/shutup` để tắt hẳn.'
+      : '🔊 Đã tắt "Chỉ trả lời khi được tag" cho nhóm này — bot trả lời mọi tin. Gõ `/silent` để im lại, `/shutup` để tắt hẳn.';
+  return { reply, handled: true, display };
+}
+
 /** Đường chạy lệnh chủ nhân; test thay bằng tiến trình giả để không gọi CLI thật. */
 export function setOwnerCommandRunner(fn) {
   ownerCommandRunner = fn;
@@ -1016,6 +1165,23 @@ async function handleCommand(ws, cmd) {
 
   try {
   switch (cmd.type) {
+    // Khung thử capability: plugin hỏi "cầu nối này có biết lệnh trong nhóm không".
+    // Bản cũ trả ok rỗng cho mọi khung nên plugin không phân biệt được; bản này trả
+    // lời thật. Từ 2.50.0, khung lạ đã bị zalo-policy từ chối bằng ``unknown_command``
+    // TRƯỚC khi tới switch, nên nhánh này chỉ chạy trên bản có classify(health_details).
+    case 'health_details': {
+      if (cmd.reqId) {
+        send(ws, {
+          type: 'ack', reqId: cmd.reqId, ok: true,
+          result: {
+            groupCommands: GROUP_COMMANDS,
+            zalo: { status: zaloApi ? 'logged-in' : 'logged-out' },
+          },
+        });
+      }
+      break;
+    }
+
     case 'send': {
       // Hermes Agent xuất Markdown (giống hệt khi trả lời trên Telegram).
       // Zalo không hiểu Markdown nhưng có hệ style riêng, nên dịch tại đây —
@@ -1116,18 +1282,56 @@ async function handleCommand(ws, cmd) {
         }
         break;
       }
+      // Hội thoại nguồn của tin: `/silent` và `/talk` đổi ô "Chỉ trả lời khi được tag" của chính nhóm này.
+      setOwnerCommandThread({ threadId: cmd.threadId ?? cmd.auth?.sourceThreadId, threadType: cmd.threadType ?? cmd.auth?.sourceThreadType });
       const result = await runOwnerCommand(String(cmd.text || ''), cmd.role === 'main' ? 'main' : 'owner');
+      // Hai nửa nâng cấp riêng (plugin Python trong Hermes, cầu nối Node) nên cầu nối mới có thể gặp câu lệnh mới
+      // hơn nó: trả câu nói rõ thay vì "(không có kết quả)", vì người gõ trong Zalo không thấy dòng nhật ký nào.
+      const reply = result?.reply || (
+        result == null
+          ? `⚠️ Cầu nối này chưa biết \`${String(cmd.text || '').trim().slice(0, 60)}\` — cập nhật mã bot rồi chạy lại \`npm start\`.`
+          : '(không có kết quả)'
+      );
       if (cmd.reqId) {
         send(ws, {
           type: 'ack', reqId: cmd.reqId, ok: true,
           result: {
-            reply: result?.reply || '(không có kết quả)',
+            reply,
             handled: Boolean(result?.handled),
             denied: Boolean(result?.denied),
             newSession: Boolean(result?.newSession),
           },
         });
       }
+      break;
+    }
+
+    case 'outgroup': {
+      // `/outgroup`: bot rời nhóm chủ nhân đang gõ. Chỉ chủ nhân (zalo-policy.js xếp `owner_command` ở mức
+      // owner), và chỉ có nghĩa trong nhóm — tin riêng không có nhóm nào để rời.
+      if (Number(cmd.threadType) !== 1) {
+        if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, result: { reply: '🚪 `/outgroup` rời nhóm bot đang ở — gõ lệnh này **trong nhóm** cần rời.', handled: true, display: '/outgroup' } });
+        finishAudit('failed', 'group_required');
+        break;
+      }
+      const reply = await leaveGroupHere(zaloApi, String(cmd.threadId));
+      finishAudit(reply.handled ? 'succeeded' : 'failed', reply.handled ? null : 'leave_failed');
+      if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, result: { ...reply, display: '/outgroup' } });
+      break;
+    }
+
+    case 'kick': {
+      // `/kick <tag | userID>`: mời người ra khỏi chính nhóm đang nhắn. Tag thật đi trong `auth.mentions`
+      // (adapter đọc từ khung tin của Zalo), UID viết tay trong `cmd.users`.
+      const reply = await kickMembersHere(zaloApi, {
+        threadId: String(cmd.threadId),
+        threadType: Number(cmd.threadType),
+        selfUid: String(selfProfile?.user_id ?? selfProfile?.userId ?? ''),
+        users: Array.isArray(cmd.users) ? cmd.users : [],
+        mentions: Array.isArray(cmd.auth?.mentions) ? cmd.auth.mentions : [],
+      });
+      finishAudit(reply.handled ? 'succeeded' : 'failed', reply.handled ? null : 'kick_failed');
+      if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, result: reply });
       break;
     }
 
@@ -1371,7 +1575,10 @@ async function handleCommand(ws, cmd) {
     }
 
     default:
-      if (cmd.reqId) send(ws, { type: 'ack', reqId: cmd.reqId, ok: false, error: `lệnh lạ: ${cmd.type}` });
+      // Nửa Python nâng cấp riêng khỏi cầu nối: khung nó gửi mà bản này chưa biết phải nói rõ, không được ok rỗng.
+      if (cmd.reqId) {
+        send(ws, { type: 'ack', reqId: cmd.reqId, ok: false, code: 'unknown_command', error: `cầu nối không hiểu khung: ${cmd.type}` });
+      }
   }
   finishAudit('succeeded');
   if (shouldAudit) activeHealth?.markOutbound();

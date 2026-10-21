@@ -9,7 +9,7 @@ const A = '2054797107487294899';
 const B = '2054797107487294811';
 const C = '2054797107487294822';
 const allOn = () => Object.fromEntries(FEATURE_KEYS.map((k) => [k, true]));
-const body = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, features: { ...allOn(), ...features }, ...over });
+const body = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, paused: false, features: { ...allOn(), ...features }, ...over });
 
 function fresh(t) {
   const dir = mkdtempSync(join(tmpdir(), 'zd-folders-'));

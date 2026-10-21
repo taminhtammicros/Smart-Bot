@@ -292,6 +292,57 @@ class UnreadableFileTest(PermissionsFile, unittest.TestCase):
         self.assertNotIn("hỏng", logs.output[0])
 
 
+class ReplyModeCommandTest(PermissionsFile, unittest.TestCase):
+    """/silent và /talk: đổi ô "Chỉ trả lời khi được tag" của đúng nhóm, các khoá khác sống qua lần ghi."""
+
+    def raw(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_silent_bat_va_talk_tat_o_cua_nhom(self):
+        self.write({"version": 1, "defaults": {"replyOnlyTagged": False},
+                    "groups": {GROUP_B: {"active": False, "features": {"web": False}}}})
+        self.assertTrue(gp.set_group_reply_only_tagged(GROUP_A, True))
+        self.assertIs(gp.group_settings(GROUP_A)["reply_only_tagged"], True)
+        self.assertTrue(gp.set_group_reply_only_tagged(GROUP_B, True))
+        self.assertIs(gp.group_settings(GROUP_B)["reply_only_tagged"], True)
+        data = self.raw()
+        self.assertEqual(data["groups"][GROUP_A], {"replyOnlyTagged": True})
+        # Nhóm B nay bằng `defaults` (False) → khoá của nhóm biến mất; phần chỉnh riêng còn nguyên.
+        self.assertTrue(gp.set_group_reply_only_tagged(GROUP_B, False))
+        self.assertEqual(self.raw()["groups"][GROUP_B], {"active": False, "features": {"web": False}})
+        self.assertIs(gp.group_settings(GROUP_B)["reply_only_tagged"], False)
+
+    def test_bang_thu_muc_thi_khong_ghi_khoa_rieng(self):
+        self.write({"version": 1, "defaults": {}, "folders": {"lop": {"name": "Lớp", "groups": [GROUP_A], "replyOnlyTagged": True}},
+                    "groups": {}})
+        self.assertFalse(gp.set_group_reply_only_tagged(GROUP_A, True))
+        self.assertNotIn(GROUP_A, self.raw()["groups"])
+        self.assertTrue(gp.set_group_reply_only_tagged(GROUP_A, False))
+        self.assertIs(gp.group_settings(GROUP_A)["reply_only_tagged"], False)
+        self.assertEqual(self.raw()["folders"]["lop"]["replyOnlyTagged"], True)
+
+    def test_tep_hong_thi_khong_ghi_de(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("{ hỏng")
+        with self.assertRaises(ValueError):
+            gp.set_group_reply_only_tagged(GROUP_A, True)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{ hỏng")
+
+    def test_shutup_dat_tam_dung_va_silent_talk_nha_ra(self):
+        self.write({"version": 1, "defaults": {}, "groups": {GROUP_A: {"active": False}}})
+        self.assertTrue(gp.set_group_paused(GROUP_A, True))
+        self.assertIs(gp.group_settings(GROUP_A)["paused"], True)
+        self.assertEqual(self.raw()["groups"][GROUP_A], {"active": False, "paused": True})
+        # Lớp riêng thắng lớp trên: thư mục đang dừng thì nhóm vẫn nhả được bằng khoá False.
+        self.assertTrue(gp.set_group_paused(GROUP_A, False))
+        self.assertIs(gp.group_settings(GROUP_A)["paused"], False)
+        self.write({"version": 1, "defaults": {"paused": True}, "groups": {GROUP_B: {"paused": False}}})
+        self.assertIs(gp.group_settings(GROUP_A)["paused"], True)
+        self.assertIs(gp.group_settings(GROUP_B)["paused"], False)
+
+
 class GuardFeatureTest(PermissionsFile, unittest.TestCase):
     def setUp(self):
         super().setUp()

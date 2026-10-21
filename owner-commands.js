@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
 import {
   closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync,
-  statSync, writeFileSync,
+  statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
+
+/** Vật mang JSON phẳng (`{…}`) — không nhận mảng. */
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /**
  * Lệnh chủ nhân gõ trong Zalo, chạy đúng câu lệnh tương ứng của Hermes.
@@ -61,16 +64,28 @@ const USAGE = {
   model: 'Tên model không hợp lệ (chỉ chữ, số và `._:/@+~-`).',
   skills: 'Cú pháp: `hermes skills search|install|inspect|check|update <tên>`.',
   config: 'Cú pháp: `hermes config set <khoá> <giá trị>` (vd. `hermes config set security.approvals.mode smart`).',
+  kick: 'Cú pháp: `/kick <userID>` — nhận UID đầy đủ, hoặc tag thẳng người cần mời ra (tag trước, UID sau).',
 };
+
+/**
+ * Bỏ chữ tag đứng trước lệnh `/` khi Zalo không gắn tag (uid) cho tin — `@Bot /silent` hay `@Minh Luan /talk`
+ * còn nguyên `@` ở đầu vẫn là lệnh chủ nhân, không phải câu trò chuyện. Câu thường có dấu gạch chéo ở giữa
+ * (`hermes config set a.b x/y`) thì để nguyên cho bộ phân tích lệnh.
+ */
+export function stripTagBeforeSlash(raw) {
+  const text = String(raw ?? '').trim();
+  if (text.startsWith('/') || !text.startsWith('@')) return text;
+  const at = text.indexOf(' /');
+  return at < 0 ? text : text.slice(at + 1).trimStart();
+}
 
 /**
  * Phân tích câu chủ nhân gõ.
  * Trả `{ run }` | `{ usage }` | `null` (không phải lệnh chủ nhân — để Hermes/agent trả lời).
  */
 export function parseOwnerCommand(raw) {
-  const text = stripConfirm(bareWords(clean(raw, 500)
-    .replace(/^(?:@\S+\s+)+/, '')) // đệm: bỏ "@Tên bot" đứng trước
-    .trim());
+  // Đệm: bỏ "@Tên bot" đứng trước; bản Zalo không gắn tag (uid) cho tin thì còn chữ "@Bot" dính liền lệnh.
+  const text = stripConfirm(bareWords(stripTagBeforeSlash(clean(raw, 500)).trim()));
   if (!text) return null;
   const words = text.split(/\s+/);
   const first = words[0].toLowerCase();
@@ -79,6 +94,12 @@ export function parseOwnerCommand(raw) {
     const cmd = first.slice(1);
     const args = words.slice(1);
     switch (cmd) {
+      case 'silent':
+        return { run: { command: 'tag-off', display: '/silent' } };
+      case 'talk':
+        return { run: { command: 'tag-on', display: '/talk' } };
+      case 'shutup':
+        return { run: { command: 'pause', display: '/shutup' } };
       case 'new':
       case 'reset':
         return { run: { command: cmd, display: `/${cmd}` } };
@@ -91,6 +112,16 @@ export function parseOwnerCommand(raw) {
       case 'remember': {
         const note = text.slice(first.length).trim();
         return note ? { run: { command: 'remember', display: '/remember', note } } : { usage: USAGE.remember };
+      }
+      case 'outgroup':
+        // Rời đúng nhóm đang nhắn — gateway gắn hội thoại nguồn vào khung lệnh.
+        return { run: { command: 'outgroup', display: '/outgroup' } };
+      case 'kick': {
+        // Tag thật (Zalo gắn uid cho tin) do adapter đọc riêng; ở đây chỉ UID viết tay.
+        const users = [...new Set(args.filter((word) => /^\d{5,24}$/.test(word)))].slice(0, 10);
+        return {
+          run: { command: 'kick', display: `/kick${users.length ? ` ${users.join(' ')}` : ''}`, users },
+        };
       }
       case 'model': {
         const target = args.join(' ').trim();
@@ -372,6 +403,49 @@ export function secretValues(env = process.env) {
   } catch { /* chưa có .env: vẫn ẩn được biến môi trường */ }
   return values.filter((value) => typeof value === 'string' && value.length >= 8);
 }
+
+/**
+ * Đặt các ô của MỘT nhóm trong `permissions.json` — lệnh `/silent` (`tagged: true`), `/talk` (`tagged: false`) và
+ * `/shutup` (`paused: true`). Mọi khoá khác, thư mục và mặc định giữ nguyên; giá trị trùng lớp thư mục/mặc định thì
+ * bỏ khoá của nhóm, giống `diffLayer` của dashboard. `resume` (`/silent`, `/talk`) bỏ ô "Tạm dừng" — lệnh gọi lại thì
+ * bot nói lại. Ghi nguyên tử rồi chạm mtime để plugin đọc lại ngay.
+ */
+export function setGroupReplyMode(file, groupId, { tagged = null, paused = null, resume = false, now = () => new Date() } = {}) {
+  const id = String(groupId ?? '');
+  if (!/^\d{1,32}$/.test(id)) throw new Error('mã nhóm không hợp lệ');
+  let data;
+  try {
+    data = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw new Error(`${basename(file)} hỏng — sửa tệp rồi thử lại: ${err?.message || err}`);
+    data = { version: 1, defaults: {}, groups: {} };
+  }
+  if (!data || typeof data !== 'object' || data.version !== 1) throw new Error(`${basename(file)} không phải phiên bản 1`);
+  const groups = isObject(data.groups) ? data.groups : (data.groups = {});
+  const entry = isObject(groups[id]) ? groups[id] : {};
+  const folder = Object.values(isObject(data.folders) ? data.folders : {})
+    .find((f) => isObject(f) && Array.isArray(f.groups) && f.groups.includes(id));
+  const next = { ...entry };
+  const put = (key, value) => {
+    const pick = (layer) => (typeof layer?.[key] === 'boolean' ? layer[key] : undefined);
+    const base = pick(folder) ?? pick(data.defaults);
+    if (value === base) delete next[key]; else next[key] = value;
+  };
+  if (tagged !== null) put('replyOnlyTagged', Boolean(tagged));
+  if (paused !== null) put('paused', Boolean(paused));
+  // Lệnh gọi lại luôn nhả "Tạm dừng", kể cả khi lớp trên đang đặt: `/talk` phải trả lời được ngay.
+  if (resume) put('paused', false);
+  if (JSON.stringify(next) === JSON.stringify(entry)) return false;
+  if (Object.keys(next).some((k) => k !== 'name')) groups[id] = next; else delete groups[id];
+  const stamp = now();
+  const tmp = `${file}.tmp-cli`;
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  renameSync(tmp, file);
+  try { utimesSync(file, stamp, stamp); } catch { /* mtime tự tăng khi ghi */ }
+  return true;
+}
+
 
 /**
  * Đường dẫn tới CLI Hermes. Thứ tự khớp với cách gateway tự gọi mình

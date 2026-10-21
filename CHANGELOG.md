@@ -3,6 +3,57 @@
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
 ## [Chưa phát hành]
+### Sửa — dải trạng thái báo "Bot đang hoạt động bình thường" trong khi máy chủ quá tải
+
+- **Hiện tượng:** Tổng quan liệt kê "Máy chủ đang tải cao — CPU 33%, RAM 98%, ổ đĩa 93%" (thẻ Cần chú ý), còn dải trạng thái ngay trên cùng vẫn xanh "Bot đang hoạt động bình thường". Hai chỗ cùng đọc `/api/status` mà kết luận trái nhau.
+- **Nguyên nhân:** `statusLevel` chỉ xét kết nối Zalo và trợ lý, bỏ qua `status.host` (CPU/RAM/ổ đĩa) dù đã nhận được.
+- **Cách sửa:** thêm `hostLoad()` dùng đúng ngưỡng 85 % như thẻ Cần chú ý; vượt ngưỡng thì dải trạng thái chuyển vàng "RAM 98%, ổ đĩa 93% — máy chủ đang tải cao, bot vẫn chạy nhưng có thể chậm. Xem Sức khoẻ máy chủ.". Mất kết nối Zalo/trợ lý vẫn nặng hơn tải máy chủ. Tổng quan dùng lại kết quả `/api/update-notice` của `Shell` thay vì hỏi lần thứ hai khi mở trang.
+- **Đo:** `node --test public/public.test.js` 84/84 (thêm ca ngưỡng 85 %, `hostLoad` rỗng khi chưa đo, Zalo mất kết nối vẫn đỏ); mở thật dashboard trên máy RAM 98–100 %: dải trạng thái vàng, đúng số đo.
+
+### Sửa — `/kick` và `/outgroup` chặn nhầm chủ nhân là quản trị viên nhóm (sự cố 21/10 11:22)
+
+- **Hiện tượng, đúng như log:** 11:22:53 `@Gd - Ông NỘI /outgroup` trong nhóm `CÁ HEO AI - BOT FORUM` → bot trả `🔒 /outgroup đụng tới tư cách thành viên trong nhóm nên chỉ chủ nhân chính chạy được`, dù người gõ là `creatorId` của chính nhóm đó.
+- **Nguyên nhân:** `_run_group_admin` chỉ so `role == "main"`, lấy từ `ZALO_MAIN_OWNER` hoặc UID **đầu tiên** trong `ZALO_ALLOWED_USERS`. Việc người gõ có phải quản trị viên nhóm hay không không được xét tới, nên một chủ nhân bot xếp thứ hai bị chặn cả khi Zalo ghi nhận họ là người tạo nhóm.
+- **Cách sửa:** điều kiện nay là **hai** vế, cả hai phải đúng — UID nằm trong `ZALO_ALLOWED_USERS` (chủ nhân bot) **và** UID nằm trong `adminIds`/`creatorId` mà `group_members` đọc từ Zalo cho đúng nhóm đang nhắn. Đọc từ Zalo chứ không từ danh sách cục bộ: người vừa được bổ nhiệm phó nhóm dùng được ngay, người vừa bị gỡ mất quyền ngay. Cầu nối không tra được (rớt, nhóm lạ, Zalo từ chối) thì từ chối — thà chặn một lệnh đúng còn hơn đuổi nhầm người.
+- **Đo:** `test_zalo_adapter.ZaloGroupAdminCommandTest` 6/6 xanh, gồm hai ca mới: chủ nhân bot không quản trị nhóm bị chặn, quản trị viên nhóm không phải chủ nhân bot cũng bị chặn. Chạy tay: `getGroupInfo` trả `creatorId: 6443313790095366114` cho nhóm `3430869407275128341`.
+
+### Mới — `/outgroup` (bot rời nhóm) và `/kick <tag | userID>` (mời người ra khỏi nhóm), chỉ chủ nhân là quản trị viên nhóm
+
+- Hai lệnh đụng tới tư cách thành viên nên chỉ người **vừa là chủ nhân bot** (`ZALO_ALLOWED_USERS`) **vừa là quản trị viên của chính nhóm đó** (`adminIds`/`creatorId` đọc từ Zalo) gõ được, và phải kèm chữ `xác nhận` trong **cùng tin** (vd. `/outgroup xác nhận`, `/kick @Tên xác nhận`, `/kick 12345678901234567 xác nhận`). Cờ đó đọc trên chính câu người dùng gửi ở plugin, cầu nối kiểm lại lần nữa (`auth.confirmed`) — trợ lý không có đường nào tự đặt hộ.
+- `/outgroup` rời đúng nhóm đang nhắn; mã lỗi 166 của Zalo ("không còn trong nhóm") coi là việc đã xong. Gõ ở tin nhắn riêng thì bot nhắc gõ trong nhóm.
+- `/kick` mời người ra khỏi chính nhóm đang nhắn. Tag thật do Zalo gắn cho tin chủ nhân gửi (`auth.mentions`) nên tag đúng người là đủ; UID viết tay đi trong `users`; nhiều tag/UID thì mời cả lượt. Mời cả lô bị Zalo từ chối vì một người đã ra nhóm (mã 165) thì tự rơi về từng người, bỏ qua người đã ra và vẫn mời người còn lại. Bot không tự mời chính mình — nhắc dùng `/outgroup`.
+- Cầu nối khai hai lệnh trong `health_details.groupCommands`, nên nhật ký nối ghi `[zalo] cầu nối nhận lệnh trong nhóm: /silent, /talk, /shutup, /outgroup, /kick`.
+- **Đo:** `owner-commands.test.js` (parser), `test_zalo_owner_command` (parser + gói khung), `hermes-bridge.test.js` (`/outgroup` rời đúng nhóm + cần xác nhận, `/kick` gộp tag với UID, bot không tự mời mình, rơi về từng người khi 165), `test_zalo_adapter.ZaloGroupAdminCommandTest` (chặn người không quản trị nhóm, tin riêng bị nhắc, cờ xác nhận và tag đi đúng vào khung).
+
+### Sửa — `/shutup` vẫn ra "Unknown command" sau khi mở lại cầu nối (sự cố 21/10 09:18)
+
+- **Hiện tượng, đúng như log:** 09:18:26 `@Minh Luan /shutup` trong nhóm `CÁ HEO AI - BOT FORUM` → gateway ghi `Unrecognized slash command /shutup from zalo`; `logs/sidecar.log` cùng lúc chỉ có `➡️ đã chuyển cho Hermes Agent`, tức chữ được chuyển tiếp thay vì chạy local.
+- **Nguyên nhân:** cầu nối đang chạy là tiến trình mở trước khi mã có khung `owner_command` — tiến trình Node sống lâu, `node server.js` không tự nạp lại mã.
+- **Lỗi ẩn thứ hai (đã sửa trong bản này):** `_read_loop` nối lại cầu nối mà **không hỏi lại** `health_details`, nên `_bridge_group_commands` giữ nguyên đáp án chụp lúc gateway khởi động. Mở lại cầu nối bằng mã mới vẫn không nhận được `/shutup` cho tới khi khởi động lại cả gateway — đúng là trạng thái gặp lúc 09:18. Nay mỗi lần nối lại đều hỏi lại capability, và nhật ký ghi `[zalo] cầu nối nhận lệnh trong nhóm: /silent, /talk, /shutup`.
+- **Đo:** `hermes-bridge.test.js` (62/62 xanh, gồm khung `owner_command` thật ghi `paused` cho nhóm rồi `/silent` nhả); chạy tay trên nhóm thật: `/shutup` → `paused: true`, `/silent` → `paused: false`; `gateway.log` 09:24:38 xác nhận cầu nối báo đủ ba lệnh.
+
+### Mới — `/shutup`: chủ nhân tắt hẳn bot trong một nhóm cho tới khi gọi lại bằng `/silent` hoặc `/talk`
+
+- `/silent` (chỉ trả lời khi được tag) và `/talk` (trả lời mọi tin) đã có; `/shutup` là chế độ thứ ba: nhóm im hẳn — không đáp tin có tag, không đáp ai, tin vẫn được giữ làm ngữ cảnh để lúc gọi lại bot trả lời đúng mạch. Chỉ chủ nhân còn nói được với bot (họ phải gõ được lệnh gọi lại), giống `/silent`/`/talk` vốn chỉ dành cho chủ nhân.
+- Gọi lại: `/silent` hoặc `/talk` luôn nhả ô "Tạm dừng" rồi đặt ô tag như cũ, nên tin kế tiếp bot trả lời ngay — kể cả khi nhóm đang bật "Chỉ trả lời khi được tag" (lệnh gọi lại được tính là một lượt, không bắt gõ thêm câu thứ hai). Tin nhắn riêng của chủ nhân không bị dừng; `/shutup` trong tin nhắn riêng trả câu hướng dẫn gõ trong nhóm.
+- Cùng tệp `permissions.json`: `groups[<id>].paused`, cũng có lớp thư mục và mặc định, nhóm đặt riêng thì thắng lớp trên. Dashboard › Phân quyền Bot có nút **Tạm dừng** cạnh "Chỉ trả lời khi được tag", có trong chỉnh nhiều nhóm và bảng quyền nhanh trong chat; Nhật ký ghi "đang tạm dừng / hết tạm dừng". Trang cũ không gửi khoá này thì giữ nguyên trạng thái của nhóm.
+- Cầu nối cũ (chưa biết `/shutup`) không làm hỏng lệnh: plugin tự ghi ô này vào `permissions.json`, và cảnh báo một dòng nhắc mở lại cầu nối để `/silent`/`/talk` nhả tạm dừng được.
+- **Đo:** `owner-commands.test.js` (parser + ghi tệp), `hermes-bridge.test.js` (khung `owner_command` thật), `test_zalo_owner_command`, `test_zalo_permissions` (`set_group_paused`, lớp thư mục/mặc định), `test_zalo_adapter` (`/shutup` chặn người ngoài, chủ nhân gõ `/silent` là nói lại), `dashboard/lib/permissions.test.js`, `dashboard/routes/permissions.test.js`, `dashboard/public/public.test.js`.
+
+### Mới — `/silent` và `/talk` bật/tắt ô "Chỉ trả lời khi được tag" ngay trong nhóm
+
+- Chủ nhân gõ `/silent` trong nhóm: bot ngừng trả lời tới khi được tag (ô "Chỉ trả lời khi được tag" của **chính nhóm đó** bật). Gõ `/talk`: bot trả lời mọi tin (ô đó tắt). Lựa chọn hiện ngay trên dashboard › Phân quyền Bot và áp dụng từ tin kế tiếp, không cần khởi động lại.
+- Cùng một tệp `permissions.json` mà dashboard ghi: đặt `groups[<id>].replyOnlyTagged`; khoá khác, thư mục và mặc định giữ nguyên. Giá trị trùng lớp thư mục/mặc định thì bỏ khoá của nhóm (giống dashboard). Tệp hỏng thì từ chối ghi, không đè mất dữ liệu. Lệnh trong tin nhắn riêng trả câu hướng dẫn gõ trong nhóm.
+- Câu lệnh chạy được cả khi bản Zalo không gắn tag cho tin (câu còn chữ `@Tên bot`) — lớp đệm của parser bỏ chữ tag đứng trước lệnh; trợ lý cũng có công cụ chủ nhân `zalo_group_reply_mode` cho việc "đừng trả lời gì nữa" / "trả lời lại mọi tin".
+- **Đo:** `test_zalo_permissions.ReplyModeCommandTest`, `test_zalo_owner_command` (parser + `@Minh Luan /silent`), `owner-commands.test.js` và `hermes-bridge.test.js` (khung `owner_command` thật ghi đúng nhóm rồi bỏ khoá khi trùng mặc định).
+
+### Sửa — `/silent` bị chặn ở lại "Unknown command" khi cầu nối chưa được mở lại (sự cố 21/10 07:02)
+
+- **Hiện tượng, đúng như Zalo:** 07:02:06 `@Gd - Ông NỘI /silent` → 07:02:17 `Unknown command /silent.`; nhật ký gateway có `Unrecognized slash command /silent from zalo`. Cùng lúc `logs/sidecar.log` ghi `📩 … @Minh Luan /silent` → `➡️ đã chuyển cho Hermes Agent`: cầu nối (Node) đang chạy là bản mở lúc **23:29 hôm trước**, không có khung `owner_command`; nó chỉ chặn lệnh gạch chéo theo danh sách trắng rồi chuyển tiếp chữ lên Hermes.
+- **Nguyên nhân:** plugin Python (`~/.hermes/plugins/...`) được nạp lại mỗi lần gateway khởi động, còn cầu nối là tiến trình `node server.js` sống lâu — hai nửa nâng cấp riêng. Khi cầu nối cũ nhận tin, adapter mới không có cửa nào để xử lý lệnh.
+- **Nay tự phát hiện lệch phiên bản, và nói rõ khi cầu nối chưa biết lệnh:** cầu nối mới từ chối khung lạ bằng `{ok:false, code:"unknown_command"}` (trước đây trả `ok` rỗng — im lặng đúng là thứ khiến lệch phiên bản không thấy được). Ngay sau khi nối, adapter gửi thử `health_details`: cầu nối mới → nhật ký `[zalo] cầu nối nhận lệnh trong nhóm: /silent, /talk`; cầu nối cũ ⇒ cảnh báo trong `gateway.log` kèm tên bản cài lấy từ `sidecar_version` mà bộ cài đóng dấu vào `plugin.yaml`, hoặc im lặng khi bản cài cũng chưa nâng cấp (không làm ồn vô ích). Cầu nối mới gặp câu lệnh nó chưa biết trả "Cầu nối này chưa biết `/…` — cập nhật mã bot rồi chạy lại `npm start`" thay cho `(không có kết quả)`.
+- **Đo:** `test_zalo_adapter.BridgeGroupCommandProbeTest` (hiểu lệnh / cầu nối cũ / cầu nối im lặng / có cảnh báo hay không theo bản cài), `hermes-bridge.test.js` (khung lạ trả `command_denied`; câu lệnh lạ trả câu nói rõ), `scripts/hermes-install-lib.test.js` (manifest cài vào Hermes mang `sidecar_version`). Bộ Python 630 test: 6 test đỏ có sẵn, do máy thiếu font tiếng Việt (`ZALO_PDF_FONT`) và icon renderer — không liên quan.
+
 ### Sửa — Lệnh chủ nhân chạy xong nhưng bot trả "(không có kết quả)" (sự cố 21/10 00:09–00:18)
 
 - **Hiện tượng, đúng như Zalo:** 00:09:42, 00:10:17, 00:15:54 chủ nhân gõ `@Minh Luan /new`, bot trả `(không có kết quả)`. `hermes gateway status` (00:10) và cả trợ lý trong nhóm (00:18) cũng chỉ nhận đúng câu đó — không phải lỗi riêng của `/new`.

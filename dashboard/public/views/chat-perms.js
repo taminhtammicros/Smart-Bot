@@ -128,7 +128,7 @@ export function PermsPanel({ conv, onClose }) {
   else if (group) {
     const id = String(conv.threadId);
     const target = mergeGroups([{ id, name: conv.name, members: null }], perms).find((g) => g.id === id);
-    const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, features: { ...s.features }, studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null });
+    const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, paused: s.paused, features: { ...s.features }, studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null });
     body = html`<${Editor} key=${id} head=${false} target=${target} value=${pick(target)} defaults=${pick(baseOfGroup(perms, id))}
       features=${perms.features} studioFeatures=${perms.studioFeatures || []} studioPolicy=${perms.studioPolicy}
       defaultQuota=${perms.studio?.quota ?? 3} mediaDefaults=${perms.studio} onSaved=${(r) => { setPerms(r); return true; }} onDirty=${setDirty} onBack=${close}

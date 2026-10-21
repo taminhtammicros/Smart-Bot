@@ -11,7 +11,8 @@ và dùng mặc định (mọi tính năng bật), không bao giờ làm bot im.
 
 Lớp gộp: mặc định gốc ← ``defaults`` trong tệp ← thư mục chứa nhóm (``folders[<fid>]``,
 mỗi nhóm thuộc tối đa một thư mục) ← ``groups[<id>]``. Khoá nào thiếu hoặc sai kiểu thì rơi xuống lớp dưới. ``reply_only_tagged`` = None nghĩa
-là "theo cờ toàn cục" ``ZALO_GROUP_REPLY_ONLY_TAGGED`` của adapter.
+là "theo cờ toàn cục" ``ZALO_GROUP_REPLY_ONLY_TAGGED`` của adapter. ``paused`` là ô "Tạm dừng" (``/shutup``): bot
+không trả lời tin nào trong nhóm cho tới khi ``/silent`` hoặc ``/talk`` gọi lại.
 """
 
 import json
@@ -146,7 +147,7 @@ def _layer(raw: Any) -> Dict[str, Any]:
     """Một lớp (defaults hoặc một nhóm): chỉ giữ khoá hợp lệ, đúng kiểu bool."""
     if not isinstance(raw, dict):
         return {}
-    out: Dict[str, Any] = _bools(raw, ("active", "replyOnlyTagged"))
+    out: Dict[str, Any] = _bools(raw, ("active", "replyOnlyTagged", "paused"))
     features = _bools(raw.get("features"), FEATURES)
     if features:
         out["features"] = features
@@ -309,7 +310,7 @@ def _load() -> Dict[str, Any]:
 
 
 def group_settings(group_id: str) -> Dict[str, Any]:
-    """Quyền đã gộp của một nhóm: ``{active, reply_only_tagged, features, soul_reminder, custom}``.
+    """Quyền đã gộp của một nhóm: ``{active, reply_only_tagged, paused, features, soul_reminder, custom}``.
 
     ``soul_reminder``: dòng nhắc riêng của nhóm (``ZALO_SOUL_REMINDER_GROUP``), ``""`` khi không đặt — adapter khi
     đó chỉ dùng ``ZALO_SOUL_REMINDER`` toàn cục.
@@ -326,7 +327,10 @@ def group_settings(group_id: str) -> Dict[str, Any]:
         features.update(layer.get("features") or {})
     active = entry.get("active", folder.get("active", defaults.get("active", True)))
     reply = entry.get("replyOnlyTagged", folder.get("replyOnlyTagged", defaults.get("replyOnlyTagged")))
-    return {"active": active, "reply_only_tagged": reply, "features": features,
+    # "Tạm dừng" (`/shutup`): mỗi lớp thắng lớp trên như mọi ô khác. `defaults.paused` cho dashboard tắt cả loạt;
+    # danh sách `dm.people[uid]` không có khoá này — hội thoại riêng không tạm dừng được.
+    paused = bool(entry.get("paused", folder.get("paused", defaults.get("paused", False))))
+    return {"active": active, "reply_only_tagged": reply, "paused": paused, "features": features,
             "soul_reminder": group_soul_reminder(group_id),
             "custom": bool(entry) or str(group_id or "") in (data.get("folder_of") or {})}
 
@@ -521,3 +525,120 @@ def studio_settings(uid: str, thread_id: str, is_group: bool) -> Dict[str, Any]:
     elif quota is None:
         quota = studio.get("quota", DEFAULT_STUDIO_QUOTA)
     return {"features": features, "quota": quota}
+
+
+def set_group_reply_only_tagged(group_id: str, tagged: bool) -> bool:
+    """Đặt ô "Chỉ trả lời khi được tag" của MỘT nhóm (dashboard › Phân quyền Bot) — lệnh ``/silent`` (True) và
+    ``/talk`` (False). Trả True khi tệp đã đổi.
+
+    Ghi đúng hình dạng dashboard đọc: chỉ ``groups[<id>].replyOnlyTagged``, mọi khoá khác (``folders``, ``dm``,
+    ``tools``…) và ``defaults`` giữ nguyên nên lựa chọn ghi trên dashboard vẫn đúng. Giá trị bằng thư mục (hoặc
+    ``defaults``) thì bỏ khoá của nhóm — giống ``diffLayer`` bên dashboard, để nhóm van theo lớp trên. Ghi nguyên tử
+    bằng ``os.replace`` và cập nhật bộ nhớ đệm, nên tin kế tiếp của cùng nhóm dùng ngay giá trị mới; dashboard cũng
+    đọc lại khi mtime đổi. Tệp hỏng → ``ValueError`` (không ghi đè mất dữ liệu).
+    """
+    gid = str(group_id or "")
+    if not (gid.isascii() and gid.isdigit() and len(gid) <= 32):
+        raise ValueError("mã nhóm không hợp lệ")
+    path = permissions_path()
+    with _lock:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            raw = {"version": 1, "defaults": {}, "groups": {}}
+        except OSError as exc:
+            raise ValueError(f"không đọc được {path.name}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(f"{path.name} hỏng ({exc}) — sửa tệp rồi thử lại") from exc
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            raise ValueError(f"{path.name} không phải phiên bản 1 — sửa tệp rồi thử lại")
+        groups = raw.get("groups") if isinstance(raw.get("groups"), dict) else None
+        if groups is None:
+            groups = {}
+            raw["groups"] = groups
+        entry = groups.get(gid) if isinstance(groups.get(gid), dict) else {}
+        folder = _folder_layer(_parse(json.dumps(raw)), gid)
+        base = folder.get("replyOnlyTagged", (raw.get("defaults") or {}).get("replyOnlyTagged"))
+        if base is bool(tagged):
+            # Nhóm bằng lớp trên: bỏ khoá riêng. Mục chỉ còn tên thì vẫn giữ — tên nhóm không phải cài đặt.
+            updated = {k: v for k, v in entry.items() if k != "replyOnlyTagged"}
+        else:
+            updated = {**entry, "replyOnlyTagged": bool(tagged)}
+        if updated == entry:
+            return False
+        if updated.keys() - {"name"}:
+            groups[gid] = updated
+        else:
+            groups.pop(gid, None)
+        tmp = path.with_name(f"{path.name}.tmp-cli")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise ValueError(f"không ghi được {path.name}: {exc}") from exc
+        _cache["key"] = None
+        _cache["data"] = None
+    return True
+
+
+def set_group_paused(group_id: str, paused: bool) -> bool:
+    """Đặt ô "Tạm dừng" của MỘT nhóm (dashboard › Phân quyền Bot) — lệnh ``/shutup`` (True); ``/silent`` và ``/talk``
+    gọi lại với ``False``. Trả True khi tệp đã đổi.
+
+    Cùng quy tắc ghi với :func:`set_group_reply_only_tagged`: chỉ ``groups[<id>].paused``, mọi khoá khác và ``folders``
+    giữ nguyên; giá trị trùng lớp thư mục (hoặc ``defaults``) thì bỏ khoá của nhóm. Ghi nguyên tử và xoá bộ nhớ đệm nên
+    tin kế tiếp của nhóm dùng ngay giá trị mới.
+    """
+    gid = str(group_id or "")
+    if not (gid.isascii() and gid.isdigit() and len(gid) <= 32):
+        raise ValueError("mã nhóm không hợp lệ")
+    path = permissions_path()
+    with _lock:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            raw = {"version": 1, "defaults": {}, "groups": {}}
+        except OSError as exc:
+            raise ValueError(f"không đọc được {path.name}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(f"{path.name} hỏng ({exc}) — sửa tệp rồi thử lại") from exc
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            raise ValueError(f"{path.name} không phải phiên bản 1 — sửa tệp rồi thử lại")
+        groups = raw.get("groups") if isinstance(raw.get("groups"), dict) else None
+        if groups is None:
+            groups = {}
+            raw["groups"] = groups
+        entry = groups.get(gid) if isinstance(groups.get(gid), dict) else {}
+        folder = _folder_layer(_parse(json.dumps(raw)), gid)
+        base = folder.get("paused", (raw.get("defaults") or {}).get("paused"))
+        if base is bool(paused):
+            updated = {k: v for k, v in entry.items() if k != "paused"}
+        else:
+            updated = {**entry, "paused": bool(paused)}
+        if updated == entry:
+            return False
+        if updated.keys() - {"name"}:
+            groups[gid] = updated
+        else:
+            groups.pop(gid, None)
+        tmp = path.with_name(f"{path.name}.tmp-cli")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise ValueError(f"không ghi được {path.name}: {exc}") from exc
+        _cache["key"] = None
+        _cache["data"] = None
+    return True

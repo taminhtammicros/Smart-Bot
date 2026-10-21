@@ -78,6 +78,14 @@ function sameThread(command, auth) {
 
 function classify(command) {
   if (command.type === 'ping') return { minimumRole: 'system', category: 'health', dangerous: false };
+  // Khung thử của plugin (``health_details``): chỉ để hỏi "cầu nối này có biết lệnh
+  // trong nhóm không". Không phải lệnh, không chạy gì, không đụng hội thoại nào —
+  // nên xếp cùng mức với ``ping``: THOÁT SỚM trước mọi phép xét ``auth``.
+  //
+  // Sự cố 21/10 07:36: plugin gọi lúc mới nối, chưa có lượt chat nào để mượn
+  // ``auth``; để mức ``public`` thì ``authorizeBridgeCommand`` trả ``auth_required``
+  // và plugin đọc đó thành "cầu nối không biết lệnh" → báo nhầm bản cũ.
+  if (command.type === 'health_details') return { minimumRole: 'system', category: 'health', dangerous: false };
   if (PUBLIC_COMMANDS.has(command.type)) return { minimumRole: 'public', category: 'send', dangerous: false };
   if (command.type === 'group_members') return { minimumRole: 'public', category: 'read', dangerous: false };
   if (command.type === 'history') return { minimumRole: 'public', category: 'read', dangerous: false };
@@ -93,6 +101,11 @@ function classify(command) {
   if (command.type === 'history_search') return { minimumRole: 'public', category: 'read', dangerous: false };
   if (command.type === 'undo') return { minimumRole: 'owner', category: 'undo', dangerous: true };
   if (command.type === 'welcome_config') return { minimumRole: 'owner', category: 'admin', dangerous: false };
+  // `/outgroup` và `/kick` đuổi người khỏi nhóm (hoặc đuổi chính bot): cần chữ xác nhận trong cùng tin, như mọi
+  // lệnh admin khác. Plugin gắn cờ đó — cầu nối không tự đặt.
+  if (command.type === 'outgroup' || command.type === 'kick') {
+    return { minimumRole: 'owner', category: 'admin', dangerous: true };
+  }
   // Kết bạn rồi tạo nhóm (zalo-friends.js): chủ bot duyệt lúc ra lệnh, sidecar tự tạo nhóm sau.
   // Lập kế hoạch dẫn tới gửi lời mời và tạo nhóm, nên cần xác nhận như createGroup; xem/huỷ thì không.
   if (command.type === 'friend_group') {
@@ -131,7 +144,9 @@ function dmDenial(command, auth, owners, dmRules) {
 
 export function authorizeBridgeCommand(command, { ownerUids = new Set(), dmRules = null } = {}) {
   const rule = classify(command || {});
-  if (!rule) return denied('public', 'command_denied', 'unknown');
+  // Khung lạ (không có trong classify) phải nói đúng là "không biết", không phải "không được phép":
+  // plugin dùng chính câu trả lời này để biết cầu nối đã có lệnh trong nhóm (adapter.bridge_group_commands).
+  if (!rule) return denied('public', 'unknown_command', 'unknown');
   if (rule.minimumRole === 'system') return allowed('system', rule.category);
 
   const auth = command?.auth;

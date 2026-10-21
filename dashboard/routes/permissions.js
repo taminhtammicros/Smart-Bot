@@ -23,6 +23,7 @@ function describeStudio(studio, quota) {
 export function describeSettings(s) {
   const off = FEATURES.filter((f) => !s.features[f.key]).map((f) => label[f.key]);
   return [s.active ? 'Hoạt động' : 'Tạm tắt', s.replyOnlyTagged ? 'chỉ trả lời khi được tag' : 'trả lời mọi tin',
+    s.paused ? 'đang tạm dừng' : '',
     off.length ? `tắt: ${off.join(', ')}` : 'bật mọi tính năng', ...describeStudio(s.studio, s.studioQuota),
     s.soulReminder ? 'dòng nhắc riêng' : ''].filter(Boolean).join(' · ');
 }
@@ -35,6 +36,7 @@ export function describePatch(p) {
   const off = pick(false);
   return [p.active === undefined ? '' : p.active ? 'Hoạt động' : 'Tạm tắt',
     p.replyOnlyTagged === undefined ? '' : p.replyOnlyTagged ? 'chỉ trả lời khi được tag' : 'trả lời mọi tin',
+    p.paused === undefined ? '' : p.paused ? 'tạm dừng' : 'hết tạm dừng',
     on.length ? `bật: ${on.join(', ')}` : '', off.length ? `tắt: ${off.join(', ')}` : ''].filter(Boolean).join(' · ');
 }
 

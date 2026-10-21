@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket as RawWebSocket } from 'ws';
@@ -1865,6 +1865,255 @@ test('owner_command chỉ chạy cho chủ nhân, kể cả khi người khác g
     assert.equal(usage.ok, true);
     assert.match(usage.result.reply, /\/remember/);
     assert.equal(usage.result.handled, true);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('/silent và /talk đổi ô "Chỉ trả lời khi được tag" của đúng nhóm trong permissions.json', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'zalo-silent-'));
+  const previous = { home: process.env.HERMES_HOME, file: process.env.ZALO_PERMISSIONS_FILE };
+  process.env.HERMES_HOME = dir;
+  delete process.env.ZALO_PERMISSIONS_FILE;
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (previous.home === undefined) delete process.env.HERMES_HOME; else process.env.HERMES_HOME = previous.home;
+    if (previous.file === undefined) delete process.env.ZALO_PERMISSIONS_FILE; else process.env.ZALO_PERMISSIONS_FILE = previous.file;
+  });
+  const api = new Proxy({}, { get: () => () => Promise.resolve({ ok: true }) });
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  const ask = (reqId, text, threadType) => {
+    ws.send(JSON.stringify({
+      type: 'owner_command', reqId, text, role: 'owner', threadId: '123456789012345678', threadType,
+      auth: auth('123456789012345678', threadType),
+    }));
+    return onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === reqId);
+  };
+  const disk = () => JSON.parse(readFileSync(join(dir, 'zalo', 'permissions.json'), 'utf8'));
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    const silent = await ask('oc-silent', '/silent', 1);
+    assert.equal(silent.ok, true);
+    assert.equal(silent.result.handled, true);
+    assert.match(silent.result.reply, /Đã bật/, silent.result.reply);
+    assert.deepEqual(disk().groups['123456789012345678'], { replyOnlyTagged: true, paused: false });
+    const talk = await ask('oc-talk', '/talk', 1);
+    assert.match(talk.result.reply, /trả lời mọi tin/);
+    // Tệp chưa có mặc định nào → cờ chung đang là "chỉ trả lời khi được tag"; /talk phải ghi đè tường minh.
+    assert.deepEqual(disk().groups['123456789012345678'], { replyOnlyTagged: false, paused: false });
+    // /shutup: tạm dừng, giữ nguyên ô tag; nhắn riêng thì không đụng gì.
+    const before = disk().groups['123456789012345678'];
+    const shutup = await ask('oc-shutup', '/shutup', 1);
+    assert.equal(shutup.result.handled, true);
+    assert.match(shutup.result.reply, /tạm dừng/);
+    assert.deepEqual(disk().groups['123456789012345678'], { ...before, paused: true });
+    const dm = await ask('oc-shutup-dm', '/shutup', 0);
+    assert.equal(dm.result.handled, false);
+    assert.match(dm.result.reply, /chỉ dùng trong nhóm/);
+    // /silent gọi lại: tắt dừng, bật ô tag — một tin là bot trả lời được.
+    const silentAgain = await ask('oc-silent-2', '/silent', 1);
+    assert.equal(silentAgain.result.handled, true);
+    assert.deepEqual(disk().groups['123456789012345678'], { replyOnlyTagged: true, paused: false });
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('khung thử capability trả lời thẳng, khung lạ bị từ chối bằng unknown_command', async (t) => {
+  // Plugin hỏi `health_details` ngay sau khi nối để biết cầu nối này có lệnh trong nhóm không.
+  // Hai điều phải giữ: khung thử trả lời được (không rơi vào "không biết lệnh"), và khung lạ thật
+  // thì nói đúng là `unknown_command` — trước đây policy trả `command_denied`, nên plugin đọc
+  // `errorCode` không thấy dấu hiệu mình cần và báo nhầm cầu nối mới là bản cũ (sự cố 21/10 07:27).
+  const api = new Proxy({}, { get: () => () => Promise.resolve({ ok: true }) });
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store: testStore(t) });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'health_details', reqId: 'hd-1', auth: auth('t1', 1), threadId: 't1', threadType: 1,
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'hd-1');
+    assert.equal(ack.ok, true);
+    assert.deepEqual(ack.result.groupCommands, ['/silent', '/talk', '/shutup', '/outgroup', '/kick']);
+
+    ws.send(JSON.stringify({
+      type: 'khung_chua_co', reqId: 'hd-2', auth: auth('t1', 1), threadId: 't1', threadType: 1,
+    }));
+    const unknown = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'hd-2');
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.errorCode, 'unknown_command');
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('lệnh chủ nhân cầu nối chưa biết thì trả câu nói rõ, không phải "(không có kết quả)"', async (t) => {
+  const api = new Proxy({}, { get: () => () => Promise.resolve({ ok: true }) });
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store: testStore(t), ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'owner_command', reqId: 'oc-unknown', text: '/lenh-chua-co', role: 'owner', threadId: 't1', threadType: 1,
+      auth: auth('owner', 1),
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'oc-unknown');
+    assert.equal(ack.ok, true);
+    assert.equal(ack.result.handled, false);
+    assert.match(ack.result.reply, /chưa biết/, ack.result.reply);
+    assert.match(ack.result.reply, /npm start/);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('/outgroup rời đúng nhóm đang nhắn, và cần chữ xác nhận', async (t) => {
+  const calls = [];
+  const api = { leaveGroup: (...args) => { calls.push(args); return Promise.resolve({ ok: true }); } };
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+
+    // Chưa gõ "xác nhận": từ chối trước khi gọi Zalo, ghi nhật ký là bị từ chối.
+    ws.send(JSON.stringify({
+      type: 'outgroup', reqId: 'leave-unconfirmed', threadId: 'group-1', threadType: 1,
+      auth: auth('group-1', 1),
+    }));
+    const denied = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'leave-unconfirmed');
+    assert.equal(denied.ok, false);
+    assert.equal(denied.errorCode, 'confirmation_required');
+    assert.deepEqual(calls, []);
+
+    ws.send(JSON.stringify({
+      type: 'outgroup', reqId: 'leave-ok', threadId: 'group-1', threadType: 1,
+      auth: auth('group-1', 1, { confirmed: true }),
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'leave-ok');
+    assert.equal(ack.ok, true);
+    assert.equal(ack.result.handled, true);
+    assert.match(ack.result.reply, /rời nhóm/);
+    assert.deepEqual(calls, [['group-1', false]]);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('/kick mời người được tag và người có UID ra khỏi chính nhóm đang nhắn', async (t) => {
+  const calls = [];
+  const store = testStore(t);
+  const api = { removeUserFromGroup: (...args) => { calls.push(args); return Promise.resolve({ ok: true }); } };
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'kick', reqId: 'kick-1', threadId: 'group-1', threadType: 1,
+      users: ['6443000000000000002'],
+      auth: {
+        ...auth('group-1', 1, { confirmed: true }),
+        mentions: [{ uid: '8022000000000000001', name: 'An' }, { uid: 'bot', name: 'Bot' }],
+      },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'kick-1');
+    assert.equal(ack.ok, true);
+    assert.deepEqual(calls, [[['8022000000000000001', '6443000000000000002'], 'group-1']]);
+    assert.match(ack.result.reply, /mời 2 người ra khỏi nhóm/);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('/kick không mời chính bot, và rơi về từng người khi một người đã ra nhóm', async (t) => {
+  const calls = [];
+  const api = {
+    removeUserFromGroup: (ids, groupId) => {
+      calls.push([ids, groupId]);
+      if (ids.length > 1) return Promise.reject(Object.assign(new Error('not in group'), { code: 165 }));
+      if (ids[0] === '6443000000000000002') return Promise.reject(Object.assign(new Error('not in group'), { code: 165 }));
+      return Promise.resolve({ ok: true });
+    },
+  };
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'kick', reqId: 'kick-2', threadId: 'group-1', threadType: 1,
+      users: ['bot', '6443000000000000002', '9000000000000000009'],
+      auth: {
+        ...auth('group-1', 1, { confirmed: true }),
+        mentions: [{ uid: 'bot', name: 'Bot' }],
+      },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'kick-2');
+    // Bot tự bỏ mình khỏi danh sách trước khi gọi Zalo.
+    assert.deepEqual(calls[0], [['6443000000000000002', '9000000000000000009'], 'group-1']);
+    assert.deepEqual(calls.slice(1), [
+      [['6443000000000000002'], 'group-1'],
+      [['9000000000000000009'], 'group-1'],
+    ]);
+    assert.match(ack.result.reply, /mời 1 người/);
+    assert.match(ack.result.reply, /không còn trong nhóm: 6443000000000000002/);
+    assert.match(ack.result.reply, /`\/outgroup`/);
+  } finally {
+    ws.close();
+    stopHermesBridge();
+  }
+});
+
+test('/kick khi bot chưa là phó nhóm thì chỉ đúng việc cần làm, không trả mã trần', async (t) => {
+  // Mã 166 là Zalo báo bot không có quyền đuổi người trong nhóm. Chủ nhân cần biết phải bổ nhiệm bot làm phó
+  // nhóm, chứ không phải đi sửa cấu hình bot — nên câu trả lời phải nói ra việc đó.
+  const api = {
+    removeUserFromGroup: () => Promise.reject(Object.assign(new Error('Không đủ quyền.'), { code: 166 })),
+  };
+  const store = testStore(t);
+  const server = startHermesBridge({ api, profile: { user_id: 'bot' }, port: 0, store, ownerUids: ['owner'] });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}`);
+  try {
+    const hello = onceMessage(ws, (msg) => msg.type === 'hello');
+    await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+    await hello;
+    ws.send(JSON.stringify({
+      type: 'kick', reqId: 'kick-3', threadId: 'group-1', threadType: 1,
+      users: ['9000000000000000009'],
+      auth: { ...auth('group-1', 1, { confirmed: true }), mentions: [] },
+    }));
+    const ack = await onceMessage(ws, (msg) => msg.type === 'ack' && msg.reqId === 'kick-3');
+    assert.match(ack.result.reply, /9000000000000000009/);
+    assert.match(ack.result.reply, /phó nhóm/);
+    assert.doesNotMatch(ack.result.reply, /Không đủ quyền\./);
+    assert.equal(ack.result.handled, false);
   } finally {
     ws.close();
     stopHermesBridge();

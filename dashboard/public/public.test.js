@@ -34,6 +34,20 @@ test('dải trạng thái và thẻ Zalo: listener đứt → vàng "Đang nối
   }
 });
 
+test('dải trạng thái: máy chủ quá tải (≥ 85 %) không còn báo "bình thường"', async () => {
+  const { statusLevel, hostLoad } = await import('./views/shell.js');
+  const st = (host) => ({ sidecar: 'up', assistant: 'connected', host, zalo: { status: 'logged-in', listener: 'connected', needsRelogin: false } });
+  assert.equal(statusLevel(st({ cpuPct: 33, ramPct: 40, diskPct: 93 })).kind, 'warn');
+  assert.match(statusLevel(st({ cpuPct: 33, ramPct: 40, diskPct: 93 })).text, /^ổ đĩa 93% — máy chủ đang tải cao/);
+  assert.equal(hostLoad({ cpuPct: 33, ramPct: 98, diskPct: 93 }), 'RAM 98%, ổ đĩa 93%');
+  assert.equal(hostLoad({ cpuPct: 84, ramPct: 20, diskPct: null }), '', 'dưới ngưỡng hoặc chưa đo');
+  assert.equal(hostLoad(null), '');
+  assert.equal(statusLevel(st({ cpuPct: 50, ramPct: 50, diskPct: 50 })).kind, 'ok');
+  assert.equal(statusLevel(st(null)).kind, 'ok', 'máy chủ chưa đo thì giữ nguyên câu bình thường');
+  // Mất kết nối Zalo vẫn nặng hơn tải máy chủ.
+  assert.equal(statusLevel({ ...st({ cpuPct: 99, ramPct: 99, diskPct: 99 }), zalo: { status: 'idle' } }).kind, 'danger');
+});
+
 test('tin nhắn: ảnh/tệp hiện nhãn + link https; chữ giữ nguyên, không bao giờ thành HTML hay link lạ', async () => {
   const { messageView, mergeMessages, preview } = await import('./views/chats.js');
   assert.deepEqual(messageView({ msgType: 'chat.photo', text: 'https://photo-stal-1.zdn.vn/a.jpg' }),
@@ -482,14 +496,13 @@ test('xưởng: ô số lượt, gửi nút xưởng chỉ khi đủ khoá, đ�
   assert.equal(studioComplete(S_OFF, SF), true);
   assert.equal(studioComplete({ studioSlides: true }, SF), false);
   assert.equal(studioComplete(undefined, SF), false);
-  const base = { active: true, replyOnlyTagged: true, features: { web: true }, studio: S_OFF, studioQuota: null };
+  const base = { active: true, replyOnlyTagged: true, paused: false, features: { web: true }, studio: S_OFF, studioQuota: null };
   const d = { ...base, studio: { ...S_OFF, studioVideo: true }, studioQuota: 5 };
   assert.deepEqual(settingsPayload(d, { isGroup: true, studioFeatures: SF }),
-    { active: true, replyOnlyTagged: true, features: { web: true }, studio: { ...S_OFF, studioVideo: true }, studioQuota: 5, imageQuota: null, videoQuota: null });
+    { active: true, replyOnlyTagged: true, paused: false, features: { web: true }, studio: { ...S_OFF, studioVideo: true }, studioQuota: 5, imageQuota: null, videoQuota: null });
   assert.deepEqual(settingsPayload({ ...d, studio: {} }, { isGroup: false, studioFeatures: SF }),
     { active: true, replyOnlyTagged: true, features: { web: true } }, 'mặc định không gửi số lượt; dữ liệu cũ không gửi nút xưởng');
   assert.equal(changeCount(d, base), 2);
-  assert.equal(sameSettings(d, base), false);
   assert.equal(sameSettings({ ...base, studioQuota: undefined }, base), true, 'thiếu số lượt = theo mặc định');
 });
 

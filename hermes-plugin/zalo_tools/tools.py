@@ -76,7 +76,8 @@ def set_turn_context(*, sender_uid: str, thread_id: str, is_group: bool,
                      is_owner: bool, text: str = "", reply_msg_id: str = "",
                      reply_cli_msg_id: str = "", reply_is_own: bool = False,
                      msg_id: str = "", sender_name: str = "",
-                     msg_ids: Optional[Sequence[str]] = None) -> None:
+                     msg_ids: Optional[Sequence[str]] = None,
+                     mentions: Optional[Sequence[Dict[str, Any]]] = None) -> None:
     """Adapter gọi trước khi đẩy tin vào agent.
 
     ``text`` là NGUYÊN VĂN tin nhắn người dùng vừa gõ, chưa qua tay mô hình.
@@ -100,6 +101,9 @@ def set_turn_context(*, sender_uid: str, thread_id: str, is_group: bool,
         # để biết câu trả lời phải trích câu nào.
         "msg_ids": [str(m) for m in (msg_ids or []) if str(m)],
         "sender_name": str(sender_name or ""),
+        # Tag thật của tin này (uid từng người được tag) — ``/kick`` đọc ở đây thay vì tin vào chữ ``@Tên``
+        # do mô hình tự gõ.
+        "mentions": [dict(m) for m in (mentions or []) if isinstance(m, dict)],
     })
 
 
@@ -111,6 +115,11 @@ def bind_turn(turn: Optional[Dict[str, Any]]) -> None:
     để lượt nào cũng mang đúng người gửi của nó. Rỗng nghĩa là không ai.
     """
     _TURN.set(dict(turn) if turn else {})
+
+
+def current_turn() -> Dict[str, Any]:
+    """Bản sao của lượt agent đang chạy — cho plugin cần tag thật và chữ gốc của người gửi."""
+    return dict(_turn())
 
 
 def _turn() -> Dict[str, Any]:
@@ -150,6 +159,15 @@ def current_authorization(*, confirmed: bool = False) -> Dict[str, Any]:
         turn_ids.append(str(turn["msg_id"]))
     if turn_ids:
         auth["msgIds"] = turn_ids
+    # Tag thật trong tin (uid từng người được tag). Cầu nối đọc chỗ này cho ``/kick``: ``@Tên`` do mô hình gõ không
+    # chứng minh được ai bị tag, còn danh sách này do Zalo gắn cho đúng tin chủ nhân viết.
+    mentions = [
+        {"uid": str(m.get("uid") or ""), "name": str(m.get("name") or "")}
+        for m in (turn.get("mentions") or [])
+        if isinstance(m, dict) and re.fullmatch(r"\d{5,24}", str(m.get("uid") or ""))
+    ]
+    if mentions:
+        auth["mentions"] = mentions
     if turn.get("sethome"):
         # Câu trả lời /sethome cho người lạ: kết nối Zalo vẫn cho gửi dù người này
         # chưa được nhắn riêng (dm-rules.js / zalo-policy.js).
@@ -1234,6 +1252,33 @@ async def zalo_reply_style(args: Dict[str, Any], **_kw) -> str:
         return _err(str(exc))
     except OSError as exc:
         return _err(f"không ghi được cài đặt: {exc}")
+
+
+async def zalo_group_reply_mode(args: Dict[str, Any], **_kw) -> str:
+    """Chủ nhân dặn bot im tới khi được tag (``/silent``) hay trả lời mọi tin (``/talk``) trong nhóm này."""
+    from . import group_permissions
+
+    turn = _turn()
+    target = str(turn.get("thread_id") or "")
+    if not turn.get("is_group") or not target:
+        return _err("chỉ đổi được ở chính nhóm đang nhắn — /silent và /talk là việc của chủ nhân trong nhóm")
+    asked = str(args.get("thread_id") or "").strip()
+    if asked and asked != target:
+        return _err("chỉ đổi được ở chính nhóm đang nhắn — không nhắm tới nhóm khác")
+    mode = str(args.get("mode") or "").strip().lower()
+    if mode not in ("silent", "talk"):
+        return _err("`mode` phải là \"silent\" hoặc \"talk\"")
+    try:
+        changed = await asyncio.to_thread(group_permissions.set_group_reply_only_tagged, target, mode == "silent")
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok({
+        "reply_only_tagged": mode == "silent",
+        "changed": changed,
+        "huong_dan": ("Đã bật: trong nhóm này bot chỉ trả lời khi được tag. Báo ngắn gọn cho chủ nhân."
+                      if mode == "silent" else
+                      "Đã tắt: trong nhóm này bot trả lời mọi tin. Báo ngắn gọn cho chủ nhân."),
+    })
 
 
 async def zalo_memory_remember(args: Dict[str, Any], **_kw) -> str:
@@ -3435,6 +3480,17 @@ TOOLS = [
         },
         [],
     ), zalo_memory_forget, TOOLSET_OWNER),
+    ("zalo_group_reply_mode", "🔇", _schema(
+        "zalo_group_reply_mode",
+        "CHỈ CHỦ NHÂN: đổi ô \"Chỉ trả lời khi được tag\" của CHÍNH nhóm đang nhắn — mode \"silent\" (bot im tới khi "
+        "được tag, việc của /silent) hoặc \"talk\" (bot trả lời mọi tin, việc của /talk). Gọi khi chủ nhân dặn "
+        "\"đừng trả lời gì nữa\" hay \"trả lời lại mọi tin\" trong nhóm.",
+        {
+            "mode": {"type": "string", "enum": ["silent", "talk"], "description": "silent = chỉ trả lời khi được tag; talk = trả lời mọi tin."},
+            "thread_id": _GROUP_ID,
+        },
+        ["mode"],
+    ), zalo_group_reply_mode, TOOLSET_OWNER),
 
     ("zalo_group_members", "🧑‍🤝‍🧑", _schema(
         "zalo_group_members",

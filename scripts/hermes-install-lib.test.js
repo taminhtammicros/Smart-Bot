@@ -158,6 +158,15 @@ test('renderPlatformManifest replaces the portable placeholder with a quoted abs
   assert.doesNotMatch(rendered, /\\"/);
 });
 
+test('manifest cài vào Hermes mang phiên bản mã bot (để plugin biết bản cài có mới hơn tiến trình hay không)', async (t) => {
+  const fx = fixture(t);
+  writeFileSync(join(fx.sidecar, 'package.json'), '{"name":"2anh-zalo-bot","version":"9.8.7"}');
+  await installHermes({ sidecarRoot: fx.sidecar, hermesHome: fx.hermesHome, skipPython: true });
+  const manifest = readFileSync(join(fx.hermesHome, 'plugins', 'platforms', 'zalo', 'plugin.yaml'), 'utf8');
+  assert.match(manifest, /^sidecar_version: "9\.8\.7"$/m);
+  assert.match(manifest, /^start_command: node ".+server\.js"$/m);
+});
+
 test('install is repeatable, installs both plugins, and preserves env and config', async (t) => {
   const fx = fixture(t);
   const first = await installHermes({ sidecarRoot: fx.sidecar, hermesHome: fx.hermesHome, skipPython: true });

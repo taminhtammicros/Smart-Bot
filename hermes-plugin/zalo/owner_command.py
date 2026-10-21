@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +43,10 @@ DANGEROUS = frozenset({
 })
 
 _SLASH = re.compile(r"^/(?P<cmd>[A-Za-z_-]+)(?P<rest>[^/\S].*)?$", re.DOTALL)
+# Lệnh gạch chéo do CẦU NỐI xử lý (đổi ô "Chỉ trả lời khi được tag"/"Tạm dừng" của nhóm trong permissions.json).
+# Không có mặt ở đây thì ``/shutup`` rơi xuống nhánh "lệnh của Hermes" và ra "Unknown command" — đúng sự cố
+# 21/10 07:02 với ``/silent``.
+BRIDGE_SLASH: Dict[str, str] = {"silent": "tag-off", "talk": "tag-on", "shutup": "pause"}
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._:/@+~-]+$")
 _PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CONFIG_KEY = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -59,6 +64,7 @@ USAGE: Dict[str, str] = {
     "sessions": "Chỉ dùng được: `hermes sessions list [số]`.",
     "resume": ("Hermes không có `sessions resume`: mở lại phiên là `hermes --resume <id>` trong terminal.\n"
                "Xem mã phiên bằng `hermes sessions list`; tách phiên mới cho hội thoại này bằng `/new`."),
+    "kick": "Cú pháp: `/kick <userID>` — nhận UID đầy đủ, hoặc tag thẳng người cần mời ra (tag trước, UID sau).",
 }
 
 
@@ -75,6 +81,19 @@ class OwnerCommand:
         return self.command in DANGEROUS
 
 
+def _strip_tag_before_slash(raw: str) -> str:
+    """Bỏ mọi từ dính liền trước lệnh ``/`` khi bản Zalo không gắn tag (uid) cho tin.
+
+    Tag thật đi kèm ``mentions`` và adapter đã bỏ chữ khỏi câu trước khi tới đây, nhưng không phải bản Zalo nào
+    cũng gắn ``mentions`` (chuyển tiếp, tin soạn ngoài khung). Khi đó ``@Minh Luan /silent`` còn nguyên ``@`` ở đầu
+    và bị bỏ qua như tin thường — lệnh chủ nhân phải chạy được cả khi ấy.
+    """
+    if not raw.startswith("@"):
+        return raw
+    pos = raw.find(" /")
+    return raw[pos + 1:].lstrip() if pos >= 0 else raw
+
+
 def parse(text: str) -> Optional[OwnerCommand]:
     """Nhận diện câu lệnh chủ nhân. ``None`` nghĩa là tin thường — để trợ lý trả lời.
 
@@ -85,6 +104,11 @@ def parse(text: str) -> Optional[OwnerCommand]:
     # Bỏ tag bot đứng trước ("@Bot /new") — adapter đã bỏ phần tag, đây là lớp đệm
     # cho câu người dùng gõ tay.
     while raw.startswith("@"):
+        # Tên hiển thị có thể nhiều từ ("@Minh Luan /silent"): bỏ hết chữ tag đứng trước lệnh.
+        stripped = _strip_tag_before_slash(raw)
+        if stripped != raw:
+            raw = stripped
+            break
         head, _, tail = raw.partition(" ")
         if not head:
             break
@@ -97,8 +121,20 @@ def parse(text: str) -> Optional[OwnerCommand]:
         cmd = match.group("cmd").lower()
         rest = (match.group("rest") or "").strip()
         args = rest.split() if rest else []
+        if cmd in BRIDGE_SLASH:
+            return OwnerCommand(BRIDGE_SLASH[cmd], f"/{cmd}")
         if cmd in ("new", "reset"):
             return OwnerCommand(cmd, f"/{cmd}")
+        if cmd == "outgroup":
+            return OwnerCommand("outgroup", "/outgroup")
+        if cmd == "kick":
+            # Tag thật đi theo ``mentions`` của khung tin (adapter đọc riêng); ở đây chỉ UID viết tay.
+            users: List[str] = []
+            for word in args:
+                if re.fullmatch(r"\d{5,24}", word) and word not in users:
+                    users.append(word)
+            display = "/kick" + (f" {' '.join(users[:10])}" if users else "")
+            return OwnerCommand("kick", display)
         if cmd == "clear":
             # Zalo không có màn hình để xoá: /clear ở đây là mở phiên mới.
             return OwnerCommand("new", "/clear")
@@ -303,7 +339,73 @@ async def run(bridge: Any, text: str, *, role: str, timeout: float = 90.0) -> Di
     return result
 
 
+
+def kick_users(display: str) -> List[str]:
+    """UID viết tay trong ``/kick <userID>``. Tag thật thì nằm ở ``mentions`` của lượt, không phải đây."""
+    out: List[str] = []
+    for word in str(display or "").split()[1:]:
+        if re.fullmatch(r"\d{5,24}", word) and word not in out:
+            out.append(word)
+    return out
+
+
+def confirmed(text: str) -> bool:
+    """Chủ nhân gõ chữ xác nhận trong CÙNG câu: "xác nhận" hoặc "xac-nhan". Cùng luật với ``confirmed`` bên sidecar."""
+    bare = re.sub(r"[\u0300-\u036f]", "", unicodedata.normalize("NFD", str(text or "")))
+    bare = bare.replace("đ", "d").replace("Đ", "D")
+    return bool(re.search(r"(^|\s)xac([\s_-]*nhan)?\s*$", bare, re.IGNORECASE))
+
+
+async def run_group_admin(
+    bridge: Any, text: str, *, role: str = "main", thread_id: str, thread_type: int = 1,
+    confirmed: bool = False, mentions: Optional[List[Dict[str, Any]]] = None,
+    users: Optional[List[str]] = None,
+    timeout: float = 90.0,
+) -> Dict[str, Any]:
+    """``/outgroup`` và ``/kick``: cùng cửa khung lệnh nhưng tự gắn cờ xác nhận và hội thoại nguồn.
+
+    Cờ ``confirmed`` đọc trên chính câu chủ nhân gõ — giống mọi lệnh đổi máy, không có đường nào để mô hình tự đặt
+    hộ. ``mentions`` là tag thật của tin; cầu nối đọc danh sách này để biết mời ai khi câu không có UID viết tay.
+    """
+    command = parse(text)
+    users = list(users) if users is not None else kick_users(text)
+    frame = {
+        "text": str(text),
+        "role": str(role),
+        "threadId": str(thread_id),
+        "threadType": int(thread_type),
+        "confirm": bool(confirmed),
+        "users": users,
+        "mentions": [
+            {"uid": str(m.get("uid") or ""), "name": str(m.get("name") or "")}
+            for m in (mentions or [])
+            if isinstance(m, dict) and re.fullmatch(r"\d{5,24}", str(m.get("uid") or ""))
+        ],
+    }
+    dedicated = getattr(bridge, "owner_group_admin", None)
+    try:
+        if callable(dedicated):
+            result = await dedicated(frame, timeout=timeout)
+        else:
+            # Bản adapter cũ không có cửa riêng: khung chung ``request`` không mang được cờ xác nhận đọc từ câu chủ
+            # nhân gõ, nên nói thẳng cần cập nhật thay vì chạy một biến thể dễ sai.
+            return {"reply": "⚠️ Bản plugin này chưa có đường cho lệnh quản trị nhóm — cập nhật mã bot rồi chạy lại.",
+                    "handled": True}
+    except Exception as exc:
+        logger.warning("[zalo] không chạy được %r: %s", text[:80], exc)
+        return {"reply": f"⚠️ Không chạy được lệnh: {exc}", "handled": True}
+    if not isinstance(result, dict):
+        return {"reply": "⚠️ Cầu nối trả về kết quả không đọc được.", "handled": True}
+    if result.get("type") == "ack":
+        if result.get("ok") is False:
+            reason = result.get("error") or result.get("errorCode") or "không rõ lý do"
+            logger.warning("[zalo] cầu nối từ chối %r: %s", text[:80], reason)
+            return {"reply": f"⚠️ Cầu nối từ chối lệnh: {reason}", "handled": True, "denied": True}
+        reply = result.get("result")
+        return reply if isinstance(reply, dict) else {"reply": "⚠️ Cầu nối trả về kết quả không đọc được.", "handled": True}
+    return result
+
 __all__ = [
-    "BRIDGE_COMMAND", "DANGEROUS", "OwnerCommand", "main_owner", "owners", "parse",
-    "role_for", "run", "slash_admins",
+    "BRIDGE_COMMAND", "BRIDGE_SLASH", "DANGEROUS", "OwnerCommand", "kick_users", "main_owner", "owners", "parse",
+    "role_for", "run", "run_group_admin", "slash_admins",
 ]

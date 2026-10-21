@@ -66,7 +66,7 @@ const noQuotas = () => ({ studioQuota: null, imageQuota: null, videoQuota: null 
 const quotasOf = (raw) => Object.fromEntries(QUOTA_KEYS.map((k) => [k, raw?.[k] ?? null]));
 export const MAX_STUDIO_QUOTA = 50;
 const MAX_STUDIO_PEOPLE = 500;
-const SWITCHES = ['active', 'replyOnlyTagged'];
+const SWITCHES = ['active', 'replyOnlyTagged', 'paused'];
 export const GROUP_ID = /^\d{1,32}$/;
 const MAX_NAME = 120;
 const MAX_GROUPS = 500;
@@ -384,14 +384,19 @@ export function parseGroupsPatch(body) {
 
 function parseSettings9(body) {
   if (!isObj(body)) throw new InvalidPermissions('Dữ liệu phân quyền không hợp lệ — tải lại trang rồi thử lại.');
-  for (const k of SWITCHES) {
+  // `paused` ("Tạm dừng", lệnh `/shutup`) là khoá mới: bản cũ của trang không gửi → giữ nguyên của nhóm.
+  if (body.paused !== undefined && typeof body.paused !== 'boolean') {
+    throw new InvalidPermissions('Công tắc Tạm dừng không hợp lệ — tải lại trang rồi thử lại.');
+  }
+  const required = SWITCHES.filter((k) => k !== 'paused');
+  for (const k of required) {
     if (typeof body[k] !== 'boolean') throw new InvalidPermissions('Thiếu công tắc Hoạt động hoặc Chỉ trả lời khi được tag — tải lại trang rồi thử lại.');
   }
   const f = body.features;
   if (!isObj(f) || Object.keys(f).some((k) => !FEATURE_KEYS.includes(k)) || FEATURE_KEYS.some((k) => typeof f[k] !== 'boolean')) {
     throw new InvalidPermissions('Danh sách tính năng không hợp lệ — tải lại trang rồi thử lại.');
   }
-  const out = { active: body.active, replyOnlyTagged: body.replyOnlyTagged, features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, f[k]])) };
+  const out = { active: body.active, replyOnlyTagged: body.replyOnlyTagged, ...(body.paused === undefined ? {} : { paused: body.paused }), features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, f[k]])) };
   // Lời nhắc riêng: không gửi = giữ nguyên; gửi chuỗi rỗng = bỏ lời nhắc riêng.
   if (body.soulReminder !== undefined) {
     if (typeof body.soulReminder !== 'string') throw new InvalidPermissions('Dòng nhắc riêng phải là chữ — tải lại trang rồi thử lại.');
@@ -405,15 +410,17 @@ function parseSettings9(body) {
  * @param {{ file: string, globalReplyOnlyTagged?: boolean | (() => boolean) }} opts
  *   globalReplyOnlyTagged — cờ ZALO_GROUP_REPLY_ONLY_TAGGED bot đang dùng (xem makeGlobalReplyOnlyTagged).
  *   Dùng để hiển thị khi tệp chưa ghi khoá này, và để ghi hạt giống `defaults.replyOnlyTagged` ở lần lưu đầu.
+ *   `paused` (ô "Tạm dừng", lệnh `/shutup`) không có ở global: chỉ tệp quyết định, mặc định tắt.
  */
 export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmEnv = () => ({ legacyWho: 'owners', gatewayOpen: true }) }) {
   const globalFlag = () => (typeof globalReplyOnlyTagged === 'function' ? globalReplyOnlyTagged() : globalReplyOnlyTagged);
-  const builtin = () => ({ active: true, replyOnlyTagged: globalFlag(), features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, true])), studio: studioOff() });
+  const builtin = () => ({ active: true, replyOnlyTagged: globalFlag(), paused: false, features: Object.fromEntries(FEATURE_KEYS.map((k) => [k, true])), studio: studioOff() });
   // Trong tệp, nút xưởng nằm chung `features`; ở giao diện tách ra `studio` (thiếu khoá = tắt).
   const merge = (base, l) => {
     const out = {
       active: l.active ?? base.active,
       replyOnlyTagged: l.replyOnlyTagged ?? base.replyOnlyTagged,
+      paused: l.paused ?? base.paused,
       features: { ...base.features, ...pickBools(l.features, FEATURE_KEYS) },
       studio: { ...base.studio, ...pickBools(l.features, STUDIO_KEYS) },
     };
@@ -570,7 +577,9 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
       if (!GROUP_ID.test(groupId)) throw new InvalidPermissions('Nhóm không hợp lệ — chọn lại từ danh sách.');
       const { data } = read();
       seedReplyOnlyTagged(data);
-      const changed = putGroup(data, groupId, settings, name, keep);
+      const current = merge(baseOf(data, merge(builtin(), data.defaults), groupId), data.groups[groupId] || {});
+      // Trang cũ không gửi nút "Tạm dừng": thiếu khoá = giữ nguyên của nhóm, không âm thầm mở lại bot.
+      const changed = putGroup(data, groupId, { ...settings, paused: settings.paused ?? current.paused }, name, keep);
       write(data);
       return { state: view({ data, exists: true, corrupt: false }), changed };
     },
@@ -588,6 +597,7 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
       for (const id of ids) {
         const cur = merge(baseOf(data, defaults, id), data.groups[id] || {});
         const settings = { active: patch.active ?? cur.active, replyOnlyTagged: patch.replyOnlyTagged ?? cur.replyOnlyTagged,
+          paused: patch.paused ?? cur.paused,
           features: { ...cur.features, ...patch.features }, studio: { ...cur.studio, ...patch.studio } };
         if (putGroup(data, id, settings, nameOf(id), keepOf(id)).length) changed += 1;
       }

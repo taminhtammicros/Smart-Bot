@@ -8,7 +8,7 @@ import { fakeSidecar, loginAs, makeDeps, startApp } from '../test-helpers.js';
 
 const G = '2054797107487294899';
 const allOn = () => Object.fromEntries(FEATURE_KEYS.map((k) => [k, true]));
-const body = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, ...over, features: { ...allOn(), ...features } });
+const body = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, paused: false, ...over, features: { ...allOn(), ...features } });
 
 async function ready(t, overrides = {}) {
   const deps = makeDeps(t, overrides);
@@ -69,7 +69,7 @@ test('Chủ bot xem và sửa được phân quyền (spec §6), có hiệu lự
 
   const saved = await call(`/api/permissions/groups/${G}`, { method: 'PUT', cookie: owner, body: body({ active: false }, { web: false }) });
   assert.equal(saved.status, 200);
-  assert.deepEqual(saved.json.groups[G], { name: 'Tổ Hoá', custom: true, folder: null, active: false, replyOnlyTagged: true, features: { ...allOn(), web: false },
+  assert.deepEqual(saved.json.groups[G], { name: 'Tổ Hoá', custom: true, folder: null, active: false, replyOnlyTagged: true, paused: false, features: { ...allOn(), web: false },
     studio: Object.fromEntries(STUDIO_FEATURES.map((f) => [f.key, false])), studioQuota: null, imageQuota: null, videoQuota: null });
   assert.deepEqual(disk().groups[G], { name: 'Tổ Hoá', active: false, features: { web: false } });
   // Lần lưu đầu ghi cờ tag thật của bot vào mặc định một lần, không ghi vào nhóm.

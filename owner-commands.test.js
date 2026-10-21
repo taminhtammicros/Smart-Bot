@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import {
   buildArgv, commandIsDangerous, createOwnerCommandRunner, formatOutput, memoryReport, parseMemoryEntries,
-  parseOwnerCommand, redactSecrets, rememberNote, runProcess,
+  parseOwnerCommand, redactSecrets, rememberNote, runProcess, setGroupReplyMode,
 } from './owner-commands.js';
 import { createOwnerDirectory, splitOwnerUids } from './zalo-owners.js';
 
@@ -64,6 +64,62 @@ test('gõ sai cú pháp trả hướng dẫn, không chạy gì', () => {
     assert.equal(parsed?.run, undefined, text);
     assert.equal(typeof parsed?.usage, 'string');
   }
+});
+
+test('/shutup là lệnh chủ nhân: tạm dừng hội thoại, kể cả khi tin còn chữ @Bot dính liền', () => {
+  for (const text of ['/shutup', '/SHUTUP', '@Bot /shutup', '@Minh Luan /shutup']) {
+    assert.deepEqual(parseOwnerCommand(text)?.run, { command: 'pause', display: '/shutup' }, text);
+  }
+});
+
+test('setGroupReplyMode ghi đúng nhóm, giữ khoá khác và bỏ khoá bằng lớp trên', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-cmd-perm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'permissions.json');
+  writeFileSync(file, JSON.stringify({
+    version: 1,
+    defaults: { replyOnlyTagged: false },
+    folders: { lop: { name: 'Lớp', groups: ['222'], replyOnlyTagged: true } },
+    groups: { 111: { active: false, features: { web: false } } },
+    dm: { who: 'open', features: {}, people: {} },
+  }));
+  assert.equal(setGroupReplyMode(file, '111', { tagged: true }), true);
+  let disk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual(disk.groups['111'], { active: false, features: { web: false }, replyOnlyTagged: true });
+  assert.equal(disk.folders.lop.replyOnlyTagged, true, 'thư mục giữ nguyên');
+  assert.deepEqual(disk.dm, { who: 'open', features: {}, people: {} }, 'mục nhắn riêng sống qua lần ghi');
+  // Trùng lớp thư mục (true) → không ghi khoá riêng cho nhóm trong thư mục.
+  assert.equal(setGroupReplyMode(file, '222', { tagged: true }), false);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).groups['222'], undefined);
+  // Trùng `defaults` (false) → khoá của nhóm biến mất.
+  assert.equal(setGroupReplyMode(file, '111', { tagged: false }), true);
+  disk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual(disk.groups['111'], { active: false, features: { web: false } });
+});
+
+test('/shutup đặt ô "Tạm dừng", không đụng ô tag; /silent và /talk nhả tạm dừng ngay', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-cmd-perm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'permissions.json');
+  const disk = () => JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(setGroupReplyMode(file, '111', { paused: true }), true);
+  assert.deepEqual(disk().groups['111'], { paused: true });
+  assert.equal(setGroupReplyMode(file, '111', { tagged: true, resume: true }), true);
+  // /silent: đặt ô tag VÀ nhả tạm dừng — `/silent` phải trả lời được ngay câu tiếp theo, kể cả khi mặc định chưa có khoá.
+  assert.deepEqual(disk().groups['111'], { replyOnlyTagged: true, paused: false }, 'resume ghi false tường minh');
+  assert.equal(setGroupReplyMode(file, '111', { tagged: false, resume: true }), true);
+  assert.deepEqual(disk().groups['111'], { replyOnlyTagged: false, paused: false }, '/talk ghi false tường minh (tệp chưa có mặc định)');
+});
+
+test('setGroupReplyMode tạo tệp khi chưa có, không đụng tệp hỏng', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-cmd-perm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'permissions.json');
+  assert.equal(setGroupReplyMode(file, '333', { tagged: true }), true);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { version: 1, defaults: {}, groups: { 333: { replyOnlyTagged: true } } });
+  writeFileSync(file, '{ hỏng');
+  assert.throws(() => setGroupReplyMode(file, '333', { tagged: false }), /hỏng/);
+  assert.equal(readFileSync(file, 'utf8'), '{ hỏng');
 });
 
 test('argv không bao giờ chứa chuỗi shell của người gõ', () => {
@@ -213,4 +269,27 @@ test('chủ nhân chính gõ "xác nhận" thì lệnh đổi máy chạy (tiế
   assert.deepEqual(calls, []);
   await run('hermes setup xác nhận', 'main');
   assert.deepEqual(calls, [['/bin/hermes', 'setup']]);
+});
+
+test('/outgroup là lệnh chủ nhân, không cần argv Hermes', () => {
+  for (const text of ['/outgroup', '/OUTGROUP']) {
+    assert.deepEqual(parseOwnerCommand(text)?.run, { command: 'outgroup', display: '/outgroup' });
+  }
+});
+
+test('/kick lấy UID viết tay, bỏ trùng; tag thật do adapter đọc riêng', () => {
+  assert.deepEqual(parseOwnerCommand('/kick 6443000000000000002')?.run, {
+    command: 'kick', display: '/kick 6443000000000000002', users: ['6443000000000000002'],
+  });
+  assert.deepEqual(parseOwnerCommand('/kick 6443000000000000002 6443000000000000002 9000000000000000009')?.run.users,
+    ['6443000000000000002', '9000000000000000009']);
+  // Chỉ có tag (@An), hoặc không có gì: vẫn là lệnh — adapter đọc ``mentions`` hay trả câu cú pháp.
+  assert.deepEqual(parseOwnerCommand('/kick @An')?.run, { command: 'kick', display: '/kick', users: [] });
+  assert.equal(parseOwnerCommand('/kick')?.run.command, 'kick');
+});
+
+test('/outgroup và /kick đuổi người nên không phải lệnh đổi máy', () => {
+  for (const text of ['/outgroup', '/kick 6443000000000000002']) {
+    assert.equal(commandIsDangerous(parseOwnerCommand(text)), false, text);
+  }
 });

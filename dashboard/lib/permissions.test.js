@@ -9,7 +9,7 @@ import { createPermissionsStore, FEATURE_KEYS, InvalidPermissions, makeDmEnv, ma
 const G = '2054797107487294899';
 const allOn = () => Object.fromEntries(FEATURE_KEYS.map((k) => [k, true]));
 const studioOff = () => Object.fromEntries(STUDIO_FEATURES.map((f) => [f.key, false]));
-const settings = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, ...over, features: { ...allOn(), ...features } });
+const settings = (over = {}, features = {}) => ({ active: true, replyOnlyTagged: true, paused: false, ...over, features: { ...allOn(), ...features } });
 
 function setup(t, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'zd-perm-'));
@@ -22,7 +22,7 @@ test('chưa có tệp: mọi tính năng bật, cờ tag theo cài đặt chung,
   const s = setup(t, { globalReplyOnlyTagged: false });
   const v = s.store.get();
   assert.equal(v.exists, false);
-  assert.deepEqual(v.defaults, { active: true, replyOnlyTagged: false, features: allOn(), studio: studioOff() });
+  assert.deepEqual(v.defaults, { active: true, replyOnlyTagged: false, paused: false, features: allOn(), studio: studioOff() });
   assert.deepEqual(v.groups, {});
   assert.equal(existsSync(s.file), false);
 });

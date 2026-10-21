@@ -109,8 +109,13 @@ test('public group_members chỉ đọc được nhóm đang trò chuyện; tra 
   }, policyOptions).code, 'owner_required');
 });
 
-test('ping is the only command exempt from authorization', () => {
+test('ping và health_details được miễn xét quyền: không gắn với hội thoại nào', () => {
   assert.deepEqual(authorizeBridgeCommand({ type: 'ping' }, policyOptions), {
+    allowed: true, role: 'system', code: 'allowed', category: 'health',
+  });
+  // Plugin hỏi khung thử ngay lúc mới nối, trước mọi lượt chat nên không có `auth` để mượn.
+  // Nay phải trả lời được (mức system), nếu không plugin đọc câu trả lời thành "bản cũ".
+  assert.deepEqual(authorizeBridgeCommand({ type: 'health_details' }, policyOptions), {
     allowed: true, role: 'system', code: 'allowed', category: 'health',
   });
 });
