@@ -3,15 +3,15 @@
 **Tiếng Việt** | [English](README.en.md)
 
 <p align="center">
-  <a href="https://zalo.me/g/5fli05n11mnwu4ntdqhq"><img alt="Tham gia nhóm Zalo cộng đồng 2Anh" src="https://img.shields.io/badge/Zalo-C%E1%BB%99ng%20%C4%91%E1%BB%93ng%202Anh-0068FF?style=for-the-badge"></a>
-  <a href="https://2anhaieducation.pro.vn/"><img alt="Trang 2Anh AI Education" src="https://img.shields.io/badge/Web-2Anh%20AI%20Education-0F766E?style=for-the-badge"></a>
-  <a href="https://www.facebook.com/luonghaianh1208"><img alt="Facebook Lương Hải Anh" src="https://img.shields.io/badge/Facebook-L%C6%B0%C6%A1ng%20H%E1%BA%A3i%20Anh-1877F2?style=for-the-badge"></a>
+  <a href="https://zalo.me/g/eyugp7bwy7k2bfdrlfbb"><img alt="Tham gia nhóm Zalo cộng đồng 2Anh" src="https://img.shields.io/badge/Zalo-C%E1%BB%99ng%20%C4%91%E1%BB%93ng%202Anh-0068FF?style=for-the-badge"></a>
+  <a href="https://2anhaieducation.pro.vn/"><img alt="Smart Bot" src="https://img.shields.io/badge/Web-2Anh%20AI%20Education-0F766E?style=for-the-badge"></a>
+  <a href="https://www.facebook.com/tamlan2010"><img alt="Facebook Ta Minh Tam" src="https://img.shields.io/badge/Facebook-L%C6%B0%C6%A1ng%20H%E1%BA%A3i%20Anh-1877F2?style=for-the-badge"></a>
 </p>
 
 <!-- CTA-ZALO -->
-<p align="center"><strong>💬 Tham gia nhóm Zalo cộng đồng 2Anh để dùng thử bot miễn phí, hỏi cách cài và đặt bot riêng:</strong><br><a href="https://zalo.me/g/5fli05n11mnwu4ntdqhq"><strong>zalo.me/g/5fli05n11mnwu4ntdqhq</strong></a></p>
+<p align="center"><strong>💬 Tham gia nhóm Zalo cộng đồng 2Anh để dùng thử bot miễn phí, hỏi cách cài và đặt bot riêng:</strong><br><a href="https://zalo.me/g/eyugp7bwy7k2bfdrlfbb"><strong>zalo.me/g/eyugp7bwy7k2bfdrlfbb</strong></a></p>
 
-Cầu nối đưa **Zalo** vào [Hermes Agent](https://github.com/NousResearch/hermes-agent) như một nền tảng đầy đủ — ngang hàng với Telegram, Discord, Slack.
+Cầu nối đưa **Zalo** vào [Hermes Agent] như một nền tảng đầy đủ — ngang hàng với Telegram, Discord, Slack.
 
 Nhắn tin trên Zalo là nói chuyện với chính con agent đang chạy trên máy bạn: đủ tools, memory, skills và cron.
 
@@ -23,7 +23,7 @@ Zalo  ⇄  sidecar zca-js (Node)  ⇄  WebSocket  ⇄  plugin Python  ⇄  Herme
 
 ## Hình ảnh thực tế
 
-Ảnh chụp dashboard của bot **Uyển Nhi** đang chạy thật trên VPS. Tên người, tên nhóm và nội dung tin nhắn đã được làm mờ.
+Ảnh chụp dashboard của bot đang chạy thật trên VPS. Tên người, tên nhóm và nội dung tin nhắn đã được làm mờ.
 
 <p align="center"><img src="docs/images/screenshots/chat-perms.jpg" width="900" alt="Phiên chat kèm bảng Quyền của nhóm"></p>
 
