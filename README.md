@@ -1,4 +1,4 @@
-# 2Anh Zalo Bot
+# Smart Bot
 
 **Tiếng Việt** | [English](README.en.md)
 
