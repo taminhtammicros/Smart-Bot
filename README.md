@@ -9,7 +9,7 @@
 </p>
 
 <!-- CTA-ZALO -->
-<p align="center"><strong>💬 Tham gia nhóm Zalo cộng đồng 2Anh để dùng thử bot miễn phí, hỏi cách cài và đặt bot riêng:</strong><br><a href="https://zalo.me/g/eyugp7bwy7k2bfdrlfbb"><strong>zalo.me/g/eyugp7bwy7k2bfdrlfbb</strong></a></p>
+<p align="center"><strong>💬 Tham gia nhóm Zalo cộng đồng Smart-Bot để dùng thử bot miễn phí, hỏi cách cài và đặt bot riêng:</strong><br><a href="https://zalo.me/g/eyugp7bwy7k2bfdrlfbb"><strong>zalo.me/g/eyugp7bwy7k2bfdrlfbb</strong></a></p>
 
 Cầu nối đưa **Zalo** vào [Hermes Agent] như một nền tảng đầy đủ — ngang hàng với Telegram, Discord, Slack.
 
@@ -38,7 +38,7 @@ Zalo  ⇄  sidecar zca-js (Node)  ⇄  WebSocket  ⇄  plugin Python  ⇄  Herme
 | <img src="docs/images/screenshots/maintenance.jpg" alt="Bảo trì"> | <p align="center"><img src="docs/images/screenshots/mobile-permissions.jpg" width="260" alt="Dashboard trên điện thoại"></p> |
 | **Cập nhật một chạm:** cài bản mới, tự sao lưu trước và tự quay về bản cũ nếu lỗi. | **Dùng tốt trên điện thoại:** thanh menu dưới, khung chat rộng. |
 
-**Ai đang dùng bot:** giáo viên dùng trong nhóm lớp và tổ chuyên môn (soạn đề, giáo án, nhắc lịch), Đoàn trường dùng cho văn bản và hoạt động, câu lạc bộ dùng để hỏi đáp và tổng hợp thảo luận. Muốn xem bot làm việc thật thì vào [nhóm Zalo cộng đồng 2Anh](https://zalo.me/g/5fli05n11mnwu4ntdqhq).
+**Ai đang dùng bot:** giáo viên dùng trong nhóm lớp và tổ chuyên môn (soạn đề, giáo án, nhắc lịch), Đoàn trường dùng cho văn bản và hoạt động, câu lạc bộ dùng để hỏi đáp và tổng hợp thảo luận. 
 
 ---
 
