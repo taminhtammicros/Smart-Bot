@@ -503,6 +503,7 @@ function Thread({ conv, onBack, onPinned, folders = null, onFolders }) {
   const [info, setInfo] = useState(null);   // { name, avatar, members, desc } — từ Zalo qua sidecar
   const [board, setBoard] = useState(null); // { pins, notes, polls } | { error }
   const [pinsOpen, setPinsOpen] = useState(false);
+  const [topics, setTopics] = useState([]); // chủ đề nhỏ bot tự gói (spec §20.2); rỗng = chưa có/kho cũ
   const [reminders, setReminders] = useState(null); // null = đang tải; [] khi lỗi/không có
   const [pinned, setPinned] = useState(Boolean(conv.pinned));
   const [pinBusy, setPinBusy] = useState(false);
@@ -520,6 +521,7 @@ function Thread({ conv, onBack, onPinned, folders = null, onFolders }) {
     let alive = true;
     const id = encodeURIComponent(conv.threadId);
     api(`/api/chats/${id}/info?type=${conv.threadType}`).then((r) => { if (alive) setInfo(r.info); }, () => {});
+    api(`/api/chats/${id}/topics?type=${conv.threadType}`).then((r) => { if (alive) setTopics(r.topics || []); }, () => { if (alive) setTopics([]); });
     api(`/api/schedules/reminders?threadId=${id}&threadType=${conv.threadType}`).then((r) => { if (alive) setReminders(r.reminders); }, () => { if (alive) setReminders([]); });
     if (conv.threadType !== 1) return () => { alive = false; };
     const load = () => api(`/api/chats/${id}/board`).then((r) => { if (alive) setBoard(r.board); }, (e) => { if (alive) setBoard((b) => b || { error: e.message }); });
@@ -718,7 +720,7 @@ function Thread({ conv, onBack, onPinned, folders = null, onFolders }) {
     ${side === 'search' ? html`<${ThreadSearch} conv=${conv} onJump=${jumpTo} onClose=${() => closeSide('search')} />` : null}
     ${side === 'perms' ? html`<${PermsPanel} conv=${conv} onClose=${() => closeSide('perms')} />` : null}
     ${side === 'media' ? html`<${MediaPanel} key=${mediaTab} conv=${conv} initialTab=${mediaTab} onClose=${() => closeSide('media')} onOpenPhoto=${(items, index) => setLightbox({ items, index })} />` : null}
-    ${side === 'info' ? html`<${InfoPanel} conv=${conv} info=${info} board=${board} reminders=${reminders} pinned=${pinned} pinBusy=${pinBusy} onPin=${togglePin} onJump=${(ref) => ref && jumpTo(ref)} statsText=${stats} onClose=${toggleInfo} onTool=${(name) => setSide(name)} folders=${folders} onFolders=${onFolders}
+    ${side === 'info' ? html`<${InfoPanel} conv=${conv} info=${info} board=${board} topics=${topics} reminders=${reminders} pinned=${pinned} pinBusy=${pinBusy} onPin=${togglePin} onJump=${(ref) => ref && jumpTo(ref)} statsText=${stats} onClose=${toggleInfo} onTool=${(name) => setSide(name)} folders=${folders} onFolders=${onFolders}
       onOpen=${(tab) => { setMediaTab(tab); setSide('media'); }} onOpenPhoto=${(items, index) => setLightbox({ items, index })} />` : null}
     ${lightbox ? html`<${Lightbox} items=${lightbox.items} index=${lightbox.index}
       onIndex=${(index) => setLightbox((cur) => ({ ...cur, index }))} onClose=${() => setLightbox(null)} />` : null}`;

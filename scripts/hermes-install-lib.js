@@ -398,6 +398,20 @@ function setEnvValue(envPath, key, value) {
   if (next !== current) writeFileSync(envPath, next, 'utf8');
 }
 
+/**
+ * Ghi một biến do trình cài quản lý vào ``<HERMES_HOME>/.env`` (tệp chưa có thì tạo).
+ * Dùng cho ``ZALO_SIDECAR_ROOT`` — plugin Python đọc để tìm kho ``data/zalo.sqlite`` (spec §20).
+ */
+function ensureHermesEnvValue(hermesHome, key, value) {
+  const envPath = join(hermesHome, '.env');
+  if (!existsSync(envPath)) {
+    mkdirSync(hermesHome, { recursive: true });
+    writeFileSync(envPath, `${key}=${value}\n`, 'utf8');
+    return;
+  }
+  setEnvValue(envPath, key, String(value).replaceAll('\\', '/'));
+}
+
 function ensureSidecarEnv(sidecarRoot, hermesHome) {
   const envPath = join(sidecarRoot, '.env');
   if (!existsSync(envPath)) {
@@ -693,16 +707,15 @@ export function secondBrainCheck({ url = '', hostPlatform = platform() } = {}) {
 }
 
 /**
- * Dòng doctor cho trí nhớ dài hạn (spec §19.10). TẮT mặc định; chỉ đọc cấu hình, không gọi mạng.
- * Hỏng khi đã chọn provider zalo_memory mà thiếu plugin, hoặc OPENVIKING_ENDPOINT không phải loopback.
+ * Dòng doctor cho trí nhớ dài hạn (spec §21.9, từ 2.52.0). TẮT mặc định; chỉ đọc cấu hình, không gọi mạng.
+ * Nay trí nhớ nằm trong kho SQLite của bot — KHÔNG cần dịch vụ ngoài, nên chỉ còn hai điều kiện: plugin có mặt
+ * và provider được chọn.
  */
-export function memoryCheck({ provider = '', endpoint = '', pluginInstalled = true, hostPlatform = platform() } = {}) {
-  if (provider !== LM_PROVIDER) return { ok: true, detail: 'tắt (mặc định) — bật trên VPS có OpenViking: xem README, mục "Trí nhớ dài hạn"' };
+export function memoryCheck({ provider = '', pluginInstalled = true, hostPlatform = platform() } = {}) {
+  if (provider !== LM_PROVIDER) return { ok: true, detail: 'tắt (mặc định) — bật bằng memory.provider: zalo_memory; xem README, mục "Trí nhớ dài hạn"' };
   if (!pluginInstalled) return { ok: false, detail: 'config.yaml chọn memory.provider: zalo_memory nhưng thiếu plugin — chạy lại install:hermes' };
-  const st = learnedMemoryStatus({ provider, endpoint, platform: hostPlatform });
-  if (st.reason === 'windows') return { ok: true, detail: 'zalo_memory không chạy trên Windows (tự tắt) — bỏ memory.provider khỏi config.yaml' };
-  if (st.reason === 'not-loopback') return { ok: false, detail: 'OPENVIKING_ENDPOINT phải là 127.0.0.1/localhost — sửa lại trong .env của Hermes' };
-  return { ok: true, detail: `bật — zalo_memory, OpenViking ${st.base}` };
+  if (hostPlatform === 'win32') return { ok: true, detail: 'zalo_memory không chạy trên Windows (tự tắt) — bỏ memory.provider khỏi config.yaml' };
+  return { ok: true, detail: 'bật — zalo_memory, kho SQLite của bot (không cần dịch vụ ngoài)' };
 }
 
 /**
@@ -722,17 +735,10 @@ export function secondBrainHint({ hostPlatform = platform(), url = '', envFile =
 }
 
 /**
- * Bộ cài trên Linux: thấy dịch vụ OpenViking mà chưa bật trí nhớ dài hạn → in cách bật (spec §19.10). KHÔNG tự bật:
- * trí nhớ tự học ghi lại nội dung trò chuyện của khách — chủ bot phải tự quyết. Windows / đã bật / không thấy dịch vụ → null.
+ * Từ 2.52.0 trí nhớ dài hạn là kho SQLite của chính bot (spec §21) — KHÔNG cần dịch vụ ngoài, nên không còn
+ * "thấy OpenViking thì gợi ý bật". Giữ hàm để chỗ gọi không đổi; luôn trả null.
  */
-export function memoryHint({ hostPlatform = platform(), provider = '', configFile = 'config.yaml của Hermes', commandProbe = spawnSync } = {}) {
-  if (hostPlatform !== 'linux' || provider === LM_PROVIDER) return null;
-  for (const unit of ['hermes-openviking.service', 'openviking.service']) {
-    if (commandProbe('systemctl', ['is-active', '--quiet', unit], { encoding: 'utf8' })?.status === 0) {
-      return `Thấy OpenViking (${unit}). Muốn bot tự học theo từng nhóm/người (tắt mặc định): đặt memory.provider: zalo_memory trong ${configFile} `
-        + 'rồi khởi động lại gateway; chu kỳ rút trí nhớ chỉnh ở dashboard › Trí nhớ. Xem README, mục "Trí nhớ dài hạn".';
-    }
-  }
+export function memoryHint(_options = {}) {
   return null;
 }
 
@@ -760,6 +766,23 @@ export function doctorHermes({
   const toolsDir = targets.tools;
   add('zalo-platform', existsSync(join(platformDir, 'adapter.py')));
   add('zalo-tools', existsSync(join(toolsDir, 'tools.py')));
+  // Trợ lý biết chuyện (spec §20): luồng nền gói chủ đề + trích tri thức + store_writer ghi sang kho SQLite.
+  add('zalo-brain-jobs', existsSync(join(toolsDir, 'brain_jobs.py')) && existsSync(join(toolsDir, 'store_writer.py')),
+    existsSync(join(toolsDir, 'brain_jobs.py')) ? 'Trợ lý biết chuyện sẵn sàng — gói chủ đề + trích tri thức chạy nền' : 'Thiếu brain_jobs.py trong zalo_tools — chạy lại install:hermes (spec §20, phiên bản 2.51.0).');
+  // Kho lịch sử: plugin Python tìm qua ZALO_SIDECAR_ROOT (installer ghi vào .env của Hermes). Sai/thiếu biến
+  // thì worker im lặng không gói chủ đề và recall tri thức rỗng — lỗi vô hình, phải báo ra ở đây.
+  // Chỉ CHẶN khi thiếu biến (cài đặt hỏng); thiếu tệp kho là bình thường ở bản mới cài chưa chạy bot lần nào.
+  const sidecarRootEnv = hermesEnvValue(layout.home, 'ZALO_SIDECAR_ROOT');
+  if (!sidecarRootEnv) {
+    add('zalo-brain-store', false, 'ZALO_SIDECAR_ROOT chưa có trong .env của Hermes — chạy lại install:hermes (spec §20.3.1)');
+  } else {
+    const brainDb = join(sidecarRootEnv, 'data', 'zalo.sqlite');
+    add('zalo-brain-store', true, existsSync(brainDb)
+      ? `kho tri thức ${brainDb}`
+      : `sẽ dùng ${brainDb} (chưa có tệp — bot chạy lần đầu sẽ tạo)`);
+  }
+
+
   const manifestPath = join(platformDir, 'plugin.yaml');
   const manifest = existsSync(manifestPath) ? readFileSync(manifestPath, 'utf8') : '';
   add('portable-manifest', Boolean(manifest) && !manifest.includes('{{SIDECAR_SERVER}}') && manifest.includes('server.js'));
@@ -810,7 +833,7 @@ export function doctorHermes({
   const secondBrain = secondBrainCheck({ url: hermesEnvValue(layout.home, SECOND_BRAIN_KEY), hostPlatform });
   add('second-brain', secondBrain.ok, secondBrain.detail);
   const memory = memoryCheck({
-    provider: String(config?.memory?.provider ?? '').trim(), endpoint: hermesEnvValue(layout.home, 'OPENVIKING_ENDPOINT'),
+    provider: String(config?.memory?.provider ?? '').trim(),
     pluginInstalled: existsSync(join(targets.memory, '__init__.py')), hostPlatform,
   });
   add('long-term-memory', memory.ok, memory.detail);
@@ -949,9 +972,10 @@ export async function installHermes({
   const root = resolve(sidecarRoot);
   const layout = resolveHermesLayout({ hermesHome });
   const token = ensureSidecarEnv(root, layout.home);
+  // Plugin Python (zalo_tools/brain_jobs.py, zalo_memory) cần biết kho lịch sử nằm ở đâu để ghi/đọc
+  // topics + facts (spec §20). Truyền bằng .env của Hermes — nơi mọi biến khác của plugin cũng nằm.
+  ensureHermesEnvValue(layout.home, 'ZALO_SIDECAR_ROOT', root);
   mkdirSync(join(root, 'data'), { recursive: true });
-
-  // Cài vào <HERMES_HOME>/plugins (không vào mã Hermes): `hermes update` không xoá được, Hermes cũ và mới đều nạp.
   const targets = pluginTargets(layout.home);
   atomicReplaceDirectory(join(root, 'hermes-plugin', 'zalo'), targets.platform);
   atomicReplaceDirectory(join(root, 'hermes-plugin', 'zalo_tools'), targets.tools);

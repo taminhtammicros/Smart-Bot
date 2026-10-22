@@ -169,15 +169,16 @@ export function buildDeps({ env = process.env, sidecarRoot = join(here, '..'), i
       url: readEnvKey(paths.hermesEnvFile, 'ZALO_SECOND_BRAIN_URL'), account: readEnvKey(paths.hermesEnvFile, 'OPENVIKING_ACCOUNT'),
       user: readEnvKey(paths.hermesEnvFile, 'OPENVIKING_USER'), apiKey: readEnvKey(paths.hermesEnvFile, 'OPENVIKING_API_KEY'),
     }) }),
-    // Kho tri thức tự học (spec §19.6, Quản trị + Chủ bot; kho DM chủ nhân chỉ Quản trị): bật khi Hermes dùng memory.provider zalo_memory, OpenViking loopback, không phải Windows.
+    // Kho tri thức tự học (spec §21, Quản trị + Chủ bot; kho DM chủ nhân chỉ Quản trị): bật khi Hermes dùng
+    // memory.provider zalo_memory. Nay là kho SQLite của bot (không còn OpenViking).
     learnedMemory: createLearnedMemory({
-      settings: () => ({ provider: readProvider(paths.hermesConfigFile), endpoint: readEnvKey(paths.hermesEnvFile, 'OPENVIKING_ENDPOINT') }),
+      settings: () => ({ provider: readProvider(paths.hermesConfigFile) }),
       names: (kind, id) => (kind === 'group' ? threadNames.cached().get(id) : people.list().find((p) => p.uid === id)?.name) || '',
       owners: () => owners.list(),
       ownerOverrides: () => owners.overrideUids(),
       everOwnersFile: paths.everOwnersFile,
-      // Chu kỳ rút trí nhớ: cùng tệp provider zalo_memory đọc nóng.
-      settingsFile: join(paths.hermesHome, 'zalo', 'memory.json'),
+      sqliteFile: paths.sqliteFile,
+      settingsFile: join(paths.hermesHome, 'zalo', 'brain.json'),
     }),
     studioUsageFile: paths.studioUsageFile,
     studioPolicyFile: paths.studioPolicyFile,

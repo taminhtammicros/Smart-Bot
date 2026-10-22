@@ -33,32 +33,29 @@ export function learnedMemoryRoutes({ learnedMemory, activity }) {
   });
   r.get(`${base}/scopes`, ...anyRole, async (req, res) => { try { res.json({ ok: true, scopes: await lm(req).scopes() }); } catch (err) { fail(res, err); } });
   r.get(`${base}/:scope/list`, ...anyRole, async (req, res) => {
-    try { res.json({ ok: true, entries: await lm(req).list(scope(req), req.query.uri ? String(req.query.uri) : undefined) }); } catch (err) { fail(res, err); }
-  });
-  r.get(`${base}/:scope/read`, ...anyRole, async (req, res) => {
-    try { res.json({ ok: true, text: await lm(req).read(scope(req), String(req.query.uri ?? '')) }); } catch (err) { fail(res, err); }
+    try { res.json({ ok: true, entries: await lm(req).list(scope(req), req.query.kind ? String(req.query.kind) : undefined) }); } catch (err) { fail(res, err); }
   });
   r.get(`${base}/:scope/search`, ...anyRole, async (req, res) => {
     try { res.json({ ok: true, hits: await lm(req).search(scope(req), req.query.q) }); } catch (err) { fail(res, err); }
   });
   r.put(`${base}/:scope/item`, ...anyRole, async (req, res) => {
     try {
-      await lm(req).edit(scope(req), String(req.body?.uri ?? ''), req.body?.text);
-      log(req, 'learned_memory_edit', `${scope(req)}: ${String(req.body?.uri ?? '').split('/').pop()}`);
+      await lm(req).edit(scope(req), String(req.body?.id ?? ''), req.body?.text);
+      log(req, 'learned_memory_edit', `${scope(req)}: ${String(req.body?.id ?? '')}`);
       res.json({ ok: true });
     } catch (err) { fail(res, err); }
   });
   r.delete(`${base}/:scope/item`, ...anyRole, async (req, res) => {
     try {
-      await lm(req).remove(scope(req), String(req.body?.uri ?? ''));
-      log(req, 'learned_memory_delete', `${scope(req)}: ${String(req.body?.uri ?? '').split('/').pop()}`);
+      await lm(req).remove(scope(req), String(req.body?.id ?? ''));
+      log(req, 'learned_memory_delete', `${scope(req)}: ${String(req.body?.id ?? '')}`);
       res.json({ ok: true });
     } catch (err) { fail(res, err); }
   });
-  /** Xoá nhiều mục: `{ uris: [...] }` → `{ done, failed }`; một dòng Nhật ký. */
+  /** Xoá nhiều mục: `{ ids: [...] }` → `{ done, failed }`; một dòng Nhật ký. */
   r.post(`${base}/:scope/bulk-delete`, ...anyRole, async (req, res) => {
     try {
-      const out = await lm(req).removeMany(scope(req), req.body?.uris);
+      const out = await lm(req).removeMany(scope(req), req.body?.ids);
       if (out.done.length) log(req, 'learned_memory_delete', `${scope(req)}: ${out.done.length} mục`);
       res.json({ ok: true, ...out });
     } catch (err) { fail(res, err); }

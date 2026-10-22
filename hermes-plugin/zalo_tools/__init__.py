@@ -56,6 +56,13 @@ def register(ctx) -> None:
         ctx.register_hook("post_tool_call", memory_tags.post_tool_call)
     except Exception:  # cố hết sức — thiếu thì bộ nhớ vẫn chạy, chỉ không tự gắn thẻ
         logger.warning("[zalo] không bật được gắn thẻ bộ nhớ", exc_info=True)
+    # Trợ lý biết chuyện (spec §20): luồng nền gói chủ đề + trích tri thức từ tin nhắn thô vào SQLite
+    # (topics/facts). Chỉ đúng tiến trình gateway mới làm việc; dashboard đọc kết quả từ cùng tệp.
+    try:
+        from . import brain_jobs
+        brain_jobs.start_worker(lambda: getattr(ctx, "llm", None))
+    except Exception:  # cố hết sức — thiếu thì bot vẫn trả lời bình thường
+        logger.warning("[zalo] không bật được luồng chủ đề/tri thức", exc_info=True)
     # Câu hỏi cần thông tin mới ("mới nhất", giá, quy định…): plugin tự tra web trước rồi đính kết quả + luật dùng nguồn
     # vào tin của lượt — mô hình không thể "quên tra" (xem freshness.py). Tắt ở Cấu hình › Phong cách trả lời.
     try:

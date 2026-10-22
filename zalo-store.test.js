@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
-import { HISTORY_SEARCH_PAGE, HISTORY_SEARCH_SCAN, openZaloStore } from './zalo-store.js';
+import { HISTORY_SEARCH_PAGE, HISTORY_SEARCH_SCAN, messageKey, openZaloStore } from './zalo-store.js';
 
 function withStore(t, options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'zalo-store-'));
@@ -108,7 +108,7 @@ test('message upsert merges a legacy msgId with a later backfill cliMsgId', (t) 
   assert.deepEqual(store.getHistory('bot', 'g1', 1, 1)[0], {
     threadId: 'g1', threadType: 1, msgId: 'm1', cliMsgId: 'c1', senderUid: 'u1',
     senderName: 'Anh', text: 'nội dung gốc', msgType: 'webchat', ts: 1000,
-    isSelf: false, source: 'backfill',
+    isSelf: false, source: 'backfill', topicId: null,
   });
 });
 
@@ -137,7 +137,7 @@ test('opening the store repairs duplicate legacy rows that share a Zalo message 
   assert.deepEqual(repaired.getHistory('bot', 'g1', 1, 10)[0], {
     threadId: 'g1', threadType: 1, msgId: 'm1', cliMsgId: 'c1', senderUid: 'bot',
     senderName: '', text: 'same message', msgType: 'webchat', ts: 1000,
-    isSelf: true, source: 'live',
+    isSelf: true, source: 'live', topicId: null,
   });
   repaired.close();
 });
@@ -317,4 +317,105 @@ test('searchHistory: quét theo trang, đủ tin thì dừng; không thấy thì
   assert.equal(new Set(all.messages.map((m) => m.msgId)).size, all.messages.length);
   const old = store.searchHistory('account-1', 'group-1', 1, { query: 'kim', sinceMs: 0 });
   assert.deepEqual(old.messages, [], 'tin quá xa ngoài trần quét');
+});
+
+// ---------------------------------------------------------------- chủ đề + tri thức (spec §20)
+
+test('chủ đề: mỗi hội thoại chỉ một chủ đề mở, đóng được rồi mở chủ đề mới', (t) => {
+  const { store } = withStore(t);
+  const first = store.openTopic('account-1', 'group-1', 1, { firstTsMs: 1000 });
+  assert.equal(store.openTopic('account-1', 'group-1', 1, { firstTsMs: 2000 }), first, 'gọi lại trong cùng hội thoại thì dùng chủ đề đang mở');
+  store.attachMessageToTopic(first, 1500);
+  store.setTopicContent('account-1', first, { title: 'Giá cà phê', abstract: 'Bàn giá tuần này' });
+  assert.deepEqual(store.listTopics('account-1', 'group-1', 1).map((row) => [row.title, row.status, row.messageCount]),
+    [['Giá cà phê', 'open', 1]]);
+  store.closeTopic('account-1', first);
+  const second = store.openTopic('account-1', 'group-1', 1, { firstTsMs: 3000 });
+  assert.notEqual(second, first, 'chủ đề cũ đóng thì mở được chủ đề mới');
+  assert.deepEqual(store.listTopics('account-1', 'group-1', 1).map((row) => row.status).sort(), ['closed', 'open']);
+});
+
+test('chủ đề: gán tin chỉ trong đúng hội thoại của chủ đề, không gán chéo', (t) => {
+  const { store } = withStore(t);
+  store.upsertMessage('account-1', { ...baseMessage, msgId: 'm-a' }, 'live');
+  store.upsertMessage('account-1', { ...baseMessage, msgId: 'm-b', threadId: 'group-2' }, 'live');
+  const topicA = store.openTopic('account-1', 'group-1', 1, { firstTsMs: 1 });
+  const topicB = store.openTopic('account-1', 'group-2', 1, { firstTsMs: 1 });
+  const keyA = messageKey('account-1', { ...baseMessage, msgId: 'm-a' });
+  const keyB = messageKey('account-1', { ...baseMessage, msgId: 'm-b', threadId: 'group-2' });
+  assert.equal(store.assignMessageTopic('account-1', keyA, topicA), true);
+  assert.equal(store.assignMessageTopic('account-1', keyB, topicA), false, 'tin của hội thoại khác không gán vào chủ đề này');
+  assert.equal(store.assignMessageTopic('account-1', keyA, topicB), false, 'chủ đề của hội thoại khác không nhận tin này');
+  assert.equal(store.getHistory('account-1', 'group-1', 1, 1)[0].topicId, topicA);
+  assert.equal(store.getHistory('account-1', 'group-2', 1, 1)[0].topicId, null);
+});
+
+test('searchHistory lọc theo chủ đề: chỉ trả tin của chủ đề, tin chưa gán là "chung"', (t) => {
+  const { store } = withStore(t);
+  store.insertMessages('account-1', [1, 2, 3].map((i) => ({
+    ...baseMessage, msgId: `m-${i}`, cliMsgId: `c-${i}`, ts: 1000 + i, text: `tin ${i}`,
+  })));
+  const topic = store.openTopic('account-1', 'group-1', 1, { firstTsMs: 1000 });
+  const m2 = { ...baseMessage, msgId: 'm-2', cliMsgId: 'c-2', ts: 1002, text: 'tin 2' };
+  store.assignMessageTopic('account-1', messageKey('account-1', m2), topic);
+  assert.deepEqual(store.searchHistory('account-1', 'group-1', 1, { topicId: topic }).messages.map((m) => m.msgId), ['m-2']);
+  assert.deepEqual(store.searchHistory('account-1', 'group-1', 1, { topicId: 'chung' }).messages.map((m) => m.msgId), ['m-1', 'm-3']);
+  assert.equal(store.searchHistory('account-1', 'group-1', 1, {}).messages.length, 3, 'không lọc chủ đề thì ra hết');
+});
+
+test('tri thức: scope sai bị từ chối, fact của nhóm này không sang nhóm khác', (t) => {
+  const { store } = withStore(t);
+  assert.throws(() => store.addFact({ accountId: 'account-1', scope: 'zalo-x-1', kind: 'event', content: 'x' }), /phạm vi|scope/);
+  assert.throws(() => store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'sai_loai', content: 'x' }), /Loại fact/);
+  store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'preference', subject: 'xưng hô',
+    content: 'Nhóm gọi bot là Nhi', sourceMsgKeys: ['k1'], confidence: 0.9 });
+  assert.deepEqual(store.activeFacts('zalo-g-1', 'account-1').map((f) => f.content), ['Nhóm gọi bot là Nhi']);
+  assert.deepEqual(store.activeFacts('zalo-g-2', 'account-1'), [], 'nhóm khác không thấy fact của nhóm này');
+  assert.deepEqual(store.searchFacts('zalo-g-2', 'account-1', 'goi bot'), [], 'tìm kiếm cũng không rò sang nhóm khác');
+  assert.deepEqual(store.searchFacts('zalo-g-1', 'account-1', 'goi bot').map((f) => f.content), ['Nhóm gọi bot là Nhi']);
+});
+
+test('tri thức: hết hạn thì không còn hiệu lực, supersede giữ dòng cũ để tra lịch sử', (t) => {
+  const { store } = withStore(t);
+  const old = store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'decision', subject: 'giá',
+    content: 'Giá cũ 50k', validToMs: 2000, at: 1000 });
+  assert.deepEqual(store.activeFacts('zalo-g-1', 'account-1', { at: 3000 }).map((f) => f.content), [], 'fact hết hạn thì recall không thấy');
+  const fresh = store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'decision', subject: 'giá',
+    content: 'Giá mới 60k', at: 3000 });
+  store.supersedeFact('zalo-g-1', 'account-1', old, fresh, { at: 4000 });
+  assert.deepEqual(store.activeFacts('zalo-g-1', 'account-1', { at: 5000 }).map((f) => f.content), ['Giá mới 60k']);
+  assert.throws(() => store.supersedeFact('zalo-g-2', 'account-1', old, fresh, { at: 5000 }), /phạm vi/, 'không supersede chéo phạm vi');
+});
+
+test('mâu thuẫn: giữ cả hai, người duyệt chọn giữ bên nào', (t) => {
+  const { store } = withStore(t);
+  const old = store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'preference', subject: 'xưng hô',
+    content: 'Gọi bot là Nhi', at: 1000 });
+  const fresh = store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'preference', subject: 'xưng hô',
+    content: 'Gọi bot là Uyển Nhi', at: 2000 });
+  store.addContradiction('zalo-g-1', 'account-1', fresh, old, 'hai bản xưng hô', 2000);
+  const queue = store.listContradictions('zalo-g-1', 'account-1');
+  assert.equal(queue.length, 1);
+  assert.equal(queue[0].resolved, '', 'chưa xử lý');
+  assert.equal(queue[0].new_content, 'Gọi bot là Uyển Nhi');
+  assert.equal(queue[0].old_content, 'Gọi bot là Nhi');
+  store.resolveContradiction('zalo-g-1', 'account-1', queue[0].id, 'keep_new', { at: 3000 });
+  assert.deepEqual(store.activeFacts('zalo-g-1', 'account-1', { at: 4000 }).map((f) => f.content), ['Gọi bot là Uyển Nhi']);
+  assert.equal(store.listContradictions('zalo-g-1', 'account-1')[0].resolved, 'keep_new');
+  assert.throws(() => store.resolveContradiction('zalo-g-1', 'account-1', queue[0].id, 'sai_loi', { at: 5000 }), /keep_new|keep_old/);
+});
+
+test('quên phạm vi: xoá fact, mâu thuẫn và chủ đề của đúng scope, giữ tin nhắn thô', (t) => {
+  const { store } = withStore(t);
+  store.upsertMessage('account-1', { ...baseMessage, msgId: 'm-1' }, 'live');
+  const topic = store.openTopic('account-1', 'group-1', 1, { firstTsMs: 1000 });
+  store.assignMessageTopic('account-1', messageKey('account-1', { ...baseMessage }), topic);
+  store.addFact({ accountId: 'account-1', scope: 'zalo-g-1', kind: 'event', content: 'Họp thứ 5' });
+  store.addFact({ accountId: 'account-1', scope: 'zalo-g-2', kind: 'event', content: 'Nhóm khác' });
+  store.forgetScopeFacts('zalo-g-1', 'account-1');
+  store.forgetScopeTopics('account-1', 'group-1', 1);
+  assert.deepEqual(store.activeFacts('zalo-g-1', 'account-1'), []);
+  assert.equal(store.activeFacts('zalo-g-2', 'account-1').length, 1, 'nhóm khác giữ nguyên');
+  assert.deepEqual(store.listTopics('account-1', 'group-1', 1), [], 'chủ đề của phạm vi bị xoá');
+  assert.equal(store.getHistory('account-1', 'group-1', 1, 1).length, 1, 'tin nhắn thô vẫn còn — lịch sử không phải tri thức');
 });

@@ -333,6 +333,22 @@ export function createStoreReader({
       .get(acc, Number(threadType), String(threadId)));
   }
 
+  /** Chủ đề nhỏ của MỘT hội thoại (spec §20.2): tên + tóm tắt cho giao diện và API. Kho cũ chưa nâng cấp → rỗng. */
+  function topicsOf(threadId, threadType, { limit = 30 } = {}) {
+    const acc = account();
+    if (!acc) return [];
+    try {
+      return open().prepare(`
+        SELECT topic_id, title, abstract, status, first_ts_ms, last_ts_ms, message_count
+        FROM topics WHERE account_id = ? AND thread_id = ? AND thread_type = ?
+        ORDER BY status = 'open' DESC, last_ts_ms DESC LIMIT ?
+      `).all(acc, String(threadId), Number(threadType), Math.min(Math.max(Number(limit) || 30, 1), 100))
+        .map((r) => ({
+          topicId: Number(r.topic_id), title: r.title, abstract: r.abstract, status: r.status,
+          firstTsMs: Number(r.first_ts_ms), lastTsMs: Number(r.last_ts_ms), messageCount: Number(r.message_count),
+        }));
+    } catch { return []; }
+  }
   function todayStats(sinceMs) {
     const acc = account();
     if (!acc) return { received: 0, sent: 0, hourly: Array.from({ length: 24 }, () => 0), topGroups: [] };
@@ -419,6 +435,7 @@ export function createStoreReader({
     searchThread,
     listMedia,
     hasThread,
+    topicsOf,
     todayStats,
     todayCounts,
     senderNames,

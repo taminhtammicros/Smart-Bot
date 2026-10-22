@@ -2,6 +2,52 @@
 
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
+## [2.53.0] — 2026-10-22
+
+### Mới — Hồ sơ gộp tự động theo phạm vi (spec §21.3)
+
+- `brain_jobs` thêm bước **gộp hồ sơ** chạy sau bước trích tri thức trong cùng vòng: đọc hồ sơ cũ + fact đang hiệu lực của ĐÚNG phạm vi, gọi `ctx.llm` không công cụ, ghi `profiles.body` kèm `source_fact_ids` (truy được fact nào sinh ra).
+- Nhịp: lần gộp đầu chờ ≥2 phút kể từ fact mới nhất; các lần sau cách ≥30 phút; mỗi vòng tối đa 3 phạm vi. Chỉ gộp khi có fact **mới hơn** lần trước (fact `superseded` không tính).
+- Bỏ vỏ bọc model hay tự thêm (khối ` ``` `, dòng tiêu đề "Hồ sơ") trước khi lưu. Hồ sơ rỗng hoặc lỗi model → **giữ hồ sơ cũ**, không ghi đè.
+- `build_memory_block` giữ xuống dòng của hồ sơ; hồ sơ lên đầu khối `<memory-context>`, trước `[Điều đã biết]`.
+
+### Sửa — Tìm kho: một luật duy nhất, có mắt dự phòng, và không còn im lặng
+
+- Hai module (`brain_jobs`, provider `zalo_memory`) từng tự giải đường dẫn riêng và **lệch nhau thật** (worker tìm ra kho, provider trả `None` → recall rỗng cùng máy). Nay provider gọi lại `brain_jobs.sqlite_path()`; bản dự phòng giữ cùng thứ tự, có test canh đồng bộ.
+- Thêm hai mắt: (4) đọc thẳng `.env` (`<HERMES_HOME>/.env` và `.env` cạnh thư mục gói) khi biến chưa vào `os.environ`; (5) dò ngược tìm thư mục có `server.js` + `data/zalo.sqlite` — chỉ hiệu quả khi plugin nằm trong thư mục mã bot, đã ghi rõ giới hạn này thay vì hứa quá.
+- Không tìm ra kho: WARNING nói rõ cách sửa (thiếu `ZALO_SIDECAR_ROOT` → chạy lại `install:hermes`) hoặc nói đây là bình thường (bot chưa chạy lần nào); các vòng sau hạ DEBUG. Trước đó **im lặng hoàn toàn**.
+
+**Đo:** `test_zalo_brain_profile.py` **25/25** (gộp hồ sơ + tìm kho + cảnh báo). Chạy thật: 4 hồ sơ tự sinh từ 4 phạm vi, mỗi hồ sơ đúng nội dung phạm vi mình, recall trả đúng và không lẫn.
+
+## [2.52.0] — 2026-10-22
+
+### Đổi — Bộ nhớ dài hạn về kho SQLite của bot, gỡ hẳn OpenViking (spec §21)
+
+- **Vì sao:** OpenViking là dự án ngoài, giấy phép **AGPL-3.0** — nhúng vào bộ cài là ràng buộc giấy phép lên toàn bộ 2anh-zalo-bot (§13 còn buộc cả người tương tác qua mạng phải nhận source). Nó cũng bắt mỗi máy chạy thêm một dịch vụ HTTP và nạp model embedding/VLM, tức vẫn phụ thuộc nhà cung cấp model. Tầng §20 đã có sẵn phần khó (topics, facts có kiểu + gốc tin nhắn + hạn hiệu lực + supersede + hàng đợi mâu thuẫn, FTS5, cô lập theo phạm vi) nên chỉ cần thêm hai bảng là đủ thay thế.
+- **Thêm vào `zalo.sqlite`:** `profiles` (hồ sơ gộp theo phạm vi, thay `profile.md` của OpenViking) và `soft_memories` + `soft_fts` (câu tự rút không schema cứng). Cả hai nằm trong `forgetScopeFacts` — quên một nhóm/người là quên trọn.
+- **Provider `zalo_memory` viết lại thuần SQLite:** `prefetch` chỉ SELECT (không mạng, không LLM) trả khối `<memory-context>` gồm Hồ sơ + Điều đã biết + Ghi chú khớp câu hỏi, trần 1 500 ký tự. Phạm vi giữ nguyên công thức `zalo-g-<nhóm>` / `zalo-u-<người>` như §19.4 nên ống dẫn cô lập không đổi. `sync_turn` không chép lại tin (sidecar đã ghi) — tránh hai nguồn sự thật.
+- **Gỡ:** `hermes-plugin/zalo_memory/openviking_base/` và phụ thuộc `httpx`. Bỏ mọi nhánh `OPENVIKING_ENDPOINT`, loopback, `auth_mode`, `api_key_would_be_sent`.
+- **Dashboard › Trí nhớ › Kho tri thức tự học** đọc/ghi thẳng kho SQLite: chọn nhóm/người, lọc theo loại (Hồ sơ · Tri thức · Ghi chú), sửa, xoá (fact đánh dấu `deleted` giữ dòng để tra lại), xoá nhiều, "Quên hết phạm vi này". Kho DM của chủ nhân bot vẫn chỉ Quản trị thấy, chặn ở máy chủ (404, không chạm kho) — như cũ.
+- **Công cụ chủ nhân** `zalo_memory_remember` / `zalo_memory_forget` ghi/xoá trong SQLite; `forget` nay dùng `ids` (số) thay `uris`. Phạm vi vẫn lấy từ ContextVar của lượt, không từ tham số mô hình.
+- **`doctor`** bỏ điều kiện loopback OpenViking; dòng `long-term-memory` chỉ còn kiểm plugin + provider. `memoryHint` không còn dò dịch vụ OpenViking.
+
+**Đo:** `node --test zalo-store.test.js` 24/24; `dashboard/lib/learned-memory.test.js` 13/13 (viết lại theo SQLite: cô lập ba loại, phân vai, quên đúng phạm vi, giữ dòng fact đã xoá); `dashboard/routes/learned-memory.test.js` 3/3; `dashboard/public/public.test.js` 84/84; `scripts/hermes-install-lib.test.js` 50/50; `scripts/cli.test.js` 3/3. Hai test cũ đã hỏng từ trước khi làm việc này (`dashboard/lib/env-file.test.js` số byte, `dashboard/lib/kb-store.test.js`) — kiểm bằng `git stash` xác nhận không phải do thay đổi này.
+
+## [2.51.0] — 2026-10-22
+
+### Mới — Trợ lý biết chuyện: chủ đề nhỏ + tri thức rời rạc theo phạm vi (spec §20)
+
+- Mỗi hội thoại (nhóm hoặc nhắn riêng) được luồng nền xếp thành các **chủ đề nhỏ** (`topics` trong `zalo.sqlite`): bot tự gói tên + tóm tắt ngắn khi hội thoại im ≥ 20 phút, gán tin đúng chủ đề; tin chưa gán là chủ đề "Chung". Dashboard: bảng Thông tin hội thoại hiển thị "Chủ đề gần đây"; API `GET /api/chats/:threadId/topics`. `zalo_thread_history` nhận thêm `topic_id` (không truyền = tìm khắp, tương thích ngược) và dán nhãn `[Chủ đề: tên]` khi lọc một chủ đề.
+- Tri thức bot tự rút thành các **fact** rời rạc có kiểu (`preference | entity | decision | task | deadline | event | owner_note`), **hạn hiệu lực** (`valid_to_ms`), **độ tin cậy**, **gốc tin nhắn** (provenance) — không còn "trí nhớ" tự do không kiểm được. `facts_fts` (FTS5) tìm kiếm trong đúng phạm vi; recall của provider `zalo_memory` trộn tối đa 4 fact đang hiệu lực của CHÍNH phạm vi vào `<memory-context>`, không gọi mạng, không gọi LLM.
+- **Chống mâu thuẫn:** fact mới cùng (kind, subject) một fact đang hiệu lực: LLM quyết "thay thế" (fact cũ thành `superseded`, còn dòng để tra lại) hay "mâu thuẫn" (cả hai giữ, xếp hàng đợi `contradictions`, Quản trị/Chủ bot duyệt ở dashboard và chọn giữ bên nào — không bao giờ âm thầm xoá).
+- **"Quên nhóm/người này" ở dashboard giờ quét dây chuyền:** xoá cây OpenViking như cũ **và** xoá facts/mâu thuẫn/chủ đề của đúng phạm vi đó trong kho lịch sử (tin nhắn thô giữ vì là lịch sử, không phải tri thức).
+- **Tách nhóm vẫn là tường cao:** mọi bảng gắn khoá `(account_id, scope)` với `scope` trùng công thức `zalo-g-<nhóm>` / `zalo-u-<người>` của §19; query facts luôn lọc theo đúng phạm vi; worker model chỉ được nhận tin của MỘT hội thoại duy nhất trong lời nhắc, phần đó là DỮ LIỆU không phải lệnh (`<` → `‹`, kế từ insight).
+- **Trần kinh tế:** ≤25 fact/lần/hội thoại; recall ≤4 fact/lượt; model gói chủ đề chỉ chạy khi hội thoại im ≥ 20 phút (chỉnh `zalo/brain.json`); lỗi model không chặn lượt chat.
+
+**Đo:** `node --test zalo-store.test.js` 24/24 (migration tệp cũ, gán chéo hội thoại bị chặn, không rò nhóm khác, supersede, hàng đợi mâu thuẫn, quên đúng scope); `node --test hermes-bridge.test.js dashboard/lib/store-reader.test.js dashboard/lib/learned-memory.test.js dashboard/public/public.test.js` xanh; `test_zalo_memory` 30/30; `scripts/hermes-install-lib.test.js` 50/50 (cài kèm `zalo-brain-jobs`).
+
+Cài: `npm run install:hermes …` như cũ — plugin mới kèm `brain_jobs.py`, `store_writer.py`; `doctor` có dòng `zalo-brain-jobs` và `zalo-brain-store`. Trình cài ghi `ZALO_SIDECAR_ROOT=<thư mục cầu nối>` vào `.env` của Hermes: plugin Python nằm ở `<HERMES_HOME>/plugins/` còn kho lịch sử ở thư mục mã cầu nối, đoán theo vị trí plugin là trỏ nhầm sang `<HERMES_HOME>/data/` (không tồn tại) — khi đó worker im lặng, không có chủ đề nào được gói và recall tri thức rỗng. Luồng nền tự chạy; tắt bằng `zalo/brain.json` `{"enabled": false}`.
+
 ## [Chưa phát hành]
 ### Sửa — dải trạng thái báo "Bot đang hoạt động bình thường" trong khi máy chủ quá tải
 

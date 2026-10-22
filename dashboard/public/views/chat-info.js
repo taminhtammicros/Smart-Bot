@@ -118,7 +118,7 @@ function Section({ title, state, onAll, empty, children }) {
  * Bảng "Thông tin hội thoại" (giống cột phải của Zalo). onOpen(tab) mở bảng Ảnh/Video · Tệp · Link ở đúng tab;
  * onTool('perms' | 'search') mở Phân quyền / Tìm tin nhắn ngay trong cột này.
  */
-export function InfoPanel({ conv, info, board, reminders, pinned, pinBusy, onPin, statsText, onClose, onOpen, onTool, onOpenPhoto, onJump, folders = null, onFolders }) {
+export function InfoPanel({ conv, info, board, reminders, topics = [], pinned, pinBusy, onPin, statsText, onClose, onOpen, onTool, onOpenPhoto, onJump, folders = null, onFolders }) {
   const group = conv.threadType === 1;
   const photos = useRecent(conv, 'photo');
   const files = useRecent(conv, 'file');
@@ -146,6 +146,15 @@ export function InfoPanel({ conv, info, board, reminders, pinned, pinBusy, onPin
       </div>
       ${folders ? html`<${FolderAssign} key=${`${conv.threadType}:${conv.threadId}`} conv=${conv} folders=${folders} onChanged=${onFolders} />` : null}
       <${Bulletin} board=${board} reminders=${reminders} group=${group} onJump=${onJump} />
+      ${topics.length ? html`<div class="info-topics">
+        <h4 class="info-topics-title">Chủ đề gần đây</h4>
+        <ul class="media-list">${topics.slice(0, 6).map((t) => html`<li key=${t.topicId} class="media-row topic-row">
+          <span class="link-ico" aria-hidden="true"><${Icon} name="brain" size=${16} /></span>
+          <span class="media-main"><span class="file-name">${t.title || 'Chủ đề'}</span>
+            <span class="muted small">${t.messageCount} tin · ${t.status === 'open' ? 'đang nói' : 'đã gói'}</span></span>
+        </li>`)
+        }</ul>
+      </div>` : null}
       <${Section} title="Ảnh/Video" state=${photos} onAll=${() => onOpen('photo')} empty="Chưa có ảnh hay video nào.">
         <ul class="media-grid info-grid">${(photos?.items || []).map((x) => html`<li key=${x.id}>
           ${x.video

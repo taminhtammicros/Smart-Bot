@@ -2685,11 +2685,13 @@ class ZaloAdapter(BasePlatformAdapter):
         sender: str = "",
         since_ms: int = 0,
         limit: int = 20,
+        topic_id: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Tìm tin trong một hội thoại, đọc từ kho SQLite của sidecar (spec §19.5)."""
+        """Tìm tin trong một hội thoại, đọc từ kho SQLite của sidecar (spec §19.5). ``topic_id`` lọc theo chủ đề
+        (spec §20.2): số nguyên là một chủ đề cụ thể, ``-1`` là chủ đề Chung (tin chưa gán)."""
         metadata = metadata or {}
-        return await self._command({
+        command: Dict[str, Any] = {
             "type": "history_search",
             "threadId": str(chat_id),
             "threadType": self._guess_thread_type(chat_id, metadata),
@@ -2697,7 +2699,10 @@ class ZaloAdapter(BasePlatformAdapter):
             "sender": str(sender or "")[:60],
             "sinceMs": int(since_ms),
             "limit": min(max(int(limit), 1), 40),
-        }, expect_ack=True)
+        }
+        if topic_id is not None:
+            command["topicId"] = int(topic_id)
+        return await self._command(command, expect_ack=True)
 
     async def welcome_config(
         self, action: str, group_id: Optional[str] = None, patch: Optional[Dict[str, Any]] = None,

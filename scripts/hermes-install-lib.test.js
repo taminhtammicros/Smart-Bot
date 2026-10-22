@@ -50,6 +50,8 @@ function fixture(t) {
   writeFileSync(join(sidecar, 'hermes-plugin', 'zalo', 'adapter.py'), '# adapter\n');
   writeFileSync(join(sidecar, 'hermes-plugin', 'zalo_tools', 'plugin.yaml'), 'name: zalo-tools\n');
   writeFileSync(join(sidecar, 'hermes-plugin', 'zalo_tools', 'tools.py'), '# tools\n');
+  writeFileSync(join(sidecar, 'hermes-plugin', 'zalo_tools', 'brain_jobs.py'), '# brain\n');
+  writeFileSync(join(sidecar, 'hermes-plugin', 'zalo_tools', 'store_writer.py'), '# store writer\n');
   writeFileSync(join(sidecar, 'tts', 'vieneu_provider.py'), '# vieneu provider\n');
   writeFileSync(join(sidecar, 'hermes-plugin', 'zalo', 'style-guide.md'), '# Hướng dẫn trình bày Zalo\n\nNội dung mặc định dùng cho kiểm thử.\n\n## Sự thật: tra trước rồi mới khẳng định\n\nTra trước.\n');
   mkdirSync(join(hermesRepo, 'plugins', 'platforms'), { recursive: true });
@@ -175,9 +177,15 @@ test('install is repeatable, installs both plugins, and preserves env and config
   assert.equal(existsSync(join(fx.hermesHome, 'plugins', 'zalo_tools', 'tools.py')), true);
   assert.match(readFileSync(join(fx.sidecar, '.env'), 'utf8'), /^ZALO_BRIDGE_TOKEN=[a-f0-9]{64}$/m);
   assert.match(readFileSync(join(fx.sidecar, '.env'), 'utf8'), new RegExp(`^HERMES_HOME=${fx.hermesHome.replaceAll('\\', '/')}$`, 'm'));
+  // Plugin Python tìm kho lịch sử qua biến này (spec §20): thiếu nó thì brain_jobs trỏ nhầm chỗ và
+  // khoá/ghi không bao giờ chạy — plugin nằm ở <HERMES_HOME>/plugins còn kho ở thư mục mã cầu nối.
+  assert.match(readFileSync(join(fx.hermesHome, '.env'), 'utf8'),
+    new RegExp(`^ZALO_SIDECAR_ROOT=${fx.sidecar.replaceAll('\\', '/')}$`, 'm'));
   writeFileSync(join(fx.sidecar, '.env'), 'CUSTOM_SENTINEL=preserve\nZALO_BRIDGE_TOKEN=fixed-token\n');
   await installHermes({ sidecarRoot: fx.sidecar, hermesHome: fx.hermesHome, skipPython: true });
   assert.match(readFileSync(join(fx.sidecar, '.env'), 'utf8'), /^CUSTOM_SENTINEL=preserve\nZALO_BRIDGE_TOKEN=fixed-token\nHERMES_HOME=/);
+  // Chạy lại: giá trị cũ bị THAY (đổi --hermes-home / chuyển chỗ mã thì phải sửa được), không nhân đôi dòng.
+  assert.equal((readFileSync(join(fx.hermesHome, '.env'), 'utf8').match(/^ZALO_SIDECAR_ROOT=/gm) || []).length, 1);
   assert.match(readFileSync(join(fx.hermesHome, 'config.yaml'), 'utf8'), /custom_value: keep-me/);
   const diagnosis = doctorHermes({ sidecarRoot: fx.sidecar, hermesHome: fx.hermesHome, skipPython: true });
   assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.checks));
@@ -535,7 +543,7 @@ test('Second brain: doctor đọc ZALO_SECOND_BRAIN_URL trong .env của Hermes;
   assert.equal(good.checks.find((c) => c.name === 'second-brain').detail, 'bật — http://127.0.0.1:1933');
 });
 
-// --- Trí nhớ dài hạn (spec §19.10): bộ cài chép plugin nhưng không bao giờ tự bật ---
+// --- Trí nhớ dài hạn (spec §21, từ 2.52.0: kho SQLite của bot, không cần dịch vụ ngoài) ---
 test('trí nhớ dài hạn: cài chép plugin vào <HERMES_HOME>/plugins/zalo_memory, không đổi memory.provider; doctor báo tắt/bật/hỏng; gỡ cài xoá plugin', async (t) => {
   const fx = fixture(t);
   await installHermes({ sidecarRoot: fx.sidecar, hermesHome: fx.hermesHome, skipPython: true });
@@ -547,22 +555,18 @@ test('trí nhớ dài hạn: cài chép plugin vào <HERMES_HOME>/plugins/zalo_m
     .checks.find((c) => c.name === 'long-term-memory');
   assert.match(doctor('linux').detail, /^tắt \(mặc định\)/);
   writeFileSync(join(fx.hermesHome, 'config.yaml'), `${readFileSync(join(fx.hermesHome, 'config.yaml'), 'utf8')}memory:\n  provider: zalo_memory\n`);
-  assert.deepEqual(doctor('linux'), { name: 'long-term-memory', ok: true, detail: 'bật — zalo_memory, OpenViking http://127.0.0.1:1933' });
+  assert.deepEqual(doctor('linux'), { name: 'long-term-memory', ok: true, detail: 'bật — zalo_memory, kho SQLite của bot (không cần dịch vụ ngoài)' });
   assert.match(doctor('win32').detail, /không chạy trên Windows/);
-  writeFileSync(join(fx.hermesHome, '.env'), 'OPENVIKING_ENDPOINT=http://10.0.0.9:1933\n');
-  assert.equal(doctor('linux').ok, false);
   uninstallHermes({ hermesHome: fx.hermesHome });
   assert.equal(existsSync(plugin), false);
 });
 
-test('trí nhớ dài hạn: gợi ý bật chỉ in trên Linux có OpenViking và chưa bật — không bao giờ tự bật', async () => {
+test('trí nhớ dài hạn: không còn gợi ý theo dịch vụ OpenViking (kho là SQLite của bot)', async () => {
   const { memoryHint } = await import('./hermes-install-lib.js');
-  const probe = (active) => (_cmd, args) => ({ status: args.at(-1) === active ? 0 : 3 });
-  assert.match(memoryHint({ hostPlatform: 'linux', provider: '', configFile: '/root/.hermes/config.yaml', commandProbe: probe('hermes-openviking.service') }),
-    /memory\.provider: zalo_memory trong \/root\/\.hermes\/config\.yaml rồi khởi động lại gateway/);
-  assert.equal(memoryHint({ hostPlatform: 'linux', provider: 'zalo_memory', commandProbe: probe('hermes-openviking.service') }), null);
-  assert.equal(memoryHint({ hostPlatform: 'linux', provider: '', commandProbe: probe('khong-co') }), null);
-  assert.equal(memoryHint({ hostPlatform: 'win32', provider: '', commandProbe: () => { throw new Error('không được gọi'); } }), null);
+  // Hàm giữ để chỗ gọi không đổi nhưng luôn im: không có dịch vụ ngoài nào để dò.
+  for (const opts of [{ hostPlatform: 'linux', provider: '' }, { hostPlatform: 'linux', provider: 'zalo_memory' }, { hostPlatform: 'win32', provider: '' }]) {
+    assert.equal(memoryHint(opts), null);
+  }
 });
 
 test('đổi tên thư mục plugin: Windows tạm giữ tệp thì thử lại; lỗi khác hoặc hết lượt thì báo', async () => {

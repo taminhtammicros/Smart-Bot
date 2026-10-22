@@ -963,14 +963,18 @@ test('Cấu hình: chữ nhập thành giá trị đúng kiểu; chỉ gửi m�
   assert.deepEqual(changedValues(list, { a: 6, b: ['1', '2'], c: false }), { b: ['1', '2'], c: false });
 });
 
-test('Kho tri thức tự học: nhãn nhóm/người (có chủ nhân), tên mục dịch sang tiếng Việt', async () => {
-  const { scopeLabel, entryLabel } = await import('./views/learned-memory.js');
+test('Kho tri thức tự học: nhãn nhóm/người (có chủ nhân), nhãn loại mục', async () => {
+  const { scopeLabel, entryLabel, itemKindLabel } = await import('./views/learned-memory.js');
   assert.equal(scopeLabel({ kind: 'group', id: '2054797107487294899', name: 'Tổ Hoá', owner: false }), 'Tổ Hoá');
   assert.equal(scopeLabel({ kind: 'dm', id: '1234567890123456789', name: '', owner: true }), 'Người chưa rõ tên (chủ nhân)');
-  assert.equal(entryLabel('viking://user/zalo-g-1/memories/preferences'), 'Sở thích, cách xưng hô');
-  assert.equal(entryLabel('viking://user/zalo-g-1/memories/events/mem_ab12.md'), 'mem_ab12');
-  const { intervalText } = await import('./views/learned-memory.js');
-  assert.deepEqual([intervalText(120), intervalText(45), intervalText(1440)], ['120 phút (2 giờ)', '45 phút', '1440 phút (24 giờ)']);
+  assert.equal(entryLabel('fact:12'), 'Tri thức');
+  assert.equal(entryLabel('soft:3'), 'Ghi chú');
+  assert.equal(entryLabel('profile'), 'Hồ sơ');
+  assert.equal(itemKindLabel({ kind: 'fact', factKind: 'decision' }), 'Quyết định');
+  assert.equal(itemKindLabel({ kind: 'fact', factKind: 'owner_note' }), 'Chủ nhân dặn');
+  assert.equal(itemKindLabel({ kind: 'soft', softKind: 'note' }), 'Ghi chú');
+  assert.equal(itemKindLabel({ kind: 'profile' }), 'Hồ sơ');
+  assert.equal(itemKindLabel(undefined), '');
 });
 
 test('Lịch hẹn: thêm giờ cùng số phút không trùng; việc một lần đã qua bị chặn', async () => {

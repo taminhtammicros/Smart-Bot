@@ -1387,11 +1387,15 @@ async function handleCommand(ws, cmd) {
       // zalo-policy.js đã ép threadId/threadType trùng hội thoại của lượt này.
       const found = activeStore
         ? activeStore.searchHistory(activeAccountId, String(cmd.threadId), threadType === ThreadType.Group ? 1 : 0, {
-          query: cmd.query, sender: cmd.sender, sinceMs: cmd.sinceMs, limit: cmd.limit,
+          query: cmd.query, sender: cmd.sender, sinceMs: cmd.sinceMs, limit: cmd.limit, topicId: cmd.topicId ?? null,
         })
         : { messages: [], scanned: 0, truncated: false };
       if (cmd.reqId) {
-        send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, result: { count: found.messages.length, ...found } });
+        // Tên chủ đề khi lọc theo một chủ đề cụ thể (spec §20.2): nhãn duy nhất cho toàn lô kết quả.
+        const topicName = cmd.topicId != null && /^[0-9]+$/.test(String(cmd.topicId).trim())
+          ? activeStore.topicTitle(activeAccountId, Number(cmd.topicId))
+          : '';
+        send(ws, { type: 'ack', reqId: cmd.reqId, ok: true, result: { count: found.messages.length, topic: topicName, ...found } });
       }
       break;
     }

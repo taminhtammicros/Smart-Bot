@@ -117,6 +117,13 @@ export function chatRoutes({ store, sidecar, threadNames, agentTrace = null, out
     try { res.json({ ok: true, info: await sidecar.chatInfo({ threadId: req.params.threadId, threadType: type }) }); } catch (err) { failSidecar(res, err); }
   });
 
+  // Chủ đề nhỏ của hội thoại (spec §20.2): tên + tóm tắt bot tự gói; kho cũ chưa có bảng → mảng rỗng.
+  r.get('/chats/:threadId/topics', requireAuth, (req, res) => {
+    const type = parseType(req.query.type);
+    if (!THREAD_ID.test(req.params.threadId) || type === null) return bad(res, BAD_THREAD);
+    try { res.json({ ok: true, topics: store.topicsOf(req.params.threadId, type) }); } catch (err) { failStore(res, err, READ_FAIL); }
+  });
+
   // Bảng tin nhóm (chỉ đọc): tin ghim kèm vị trí trong lịch sử để bấm là nhảy tới, ghi chú, bình chọn.
   r.get('/chats/:threadId/board', requireAuth, async (req, res) => {
     if (!THREAD_ID.test(req.params.threadId)) return bad(res, BAD_THREAD);

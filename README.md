@@ -102,7 +102,7 @@ Plugin nền tảng của Hermes lại viết bằng **Python**. Nên bản này
 
 Trước đây *có* một bộ não Node dự phòng gọi thẳng LLM. Đã bỏ, vì hai lý do. Nó không bao giờ chạy nên âm thầm mục ruỗng — mấy lỗi nặng nhất của dự án (định tuyến nhóm sai, kiểm chủ nhân sai) đều nằm trong đoạn đó và sống sót nhiều tháng vì không ai đi qua. Nguy hiểm hơn: khi nó *có* chạy thì lại chạy bằng bộ luật khác — Hermes phân quyền theo toolset, còn bộ não Node đọc một tệp JSON và không có tầng phân quyền nào. Hermes rớt là hệ thống lặng lẽ hạ cấp sang bộ luật lỏng hơn, đúng lúc không ai để ý.
 
-**48 công cụ cho agent** — thay cho trang quản trị. Nói bằng lời thay vì bấm nút:
+**71 công cụ cho agent** — thay cho trang quản trị. Nói bằng lời thay vì bấm nút:
 
 | Nhóm | Công cụ |
 |---|---|
@@ -126,19 +126,19 @@ Cầu nối chỉ chấp nhận các hàm zca-js nằm trong **danh sách trắn
 
 ### Hai mức quyền
 
-48 công cụ chia làm ba nhóm, quyết định bằng `ZALO_ALLOWED_USERS` (riêng `zalo_group_history` chỉ tồn tại trong việc hẹn giờ của nhóm):
+71 công cụ chia làm ba nhóm, quyết định bằng `ZALO_ALLOWED_USERS` (riêng `zalo_group_history` chỉ tồn tại trong việc hẹn giờ của nhóm):
 
 | | Chủ nhân | Người khác trong nhóm |
 |---|---|---|
 | Toolset | `hermes-zalo` + `zalo_owner` + `zalo_public` | chỉ `zalo_public` |
-| Số công cụ Zalo | 47 | 15 |
+| Số công cụ Zalo | 44 | 27 |
 | `terminal`, `read_file`, `write_file` | ✅ | ❌ |
 | `browser_*`, `web_search` | ✅ | ❌ |
 | Công cụ MCP | ✅ | ❌ mặc định — chỉ server khai trong `ZALO_PUBLIC_MCP` |
 | Nhắm tới hội thoại khác | ✅ | ❌ — khoá trong cuộc trò chuyện hiện tại |
 | Nhắn riêng với bot | ✅ | ❌ mặc định (`ZALO_DM_POLICY`) |
 
-**15 công cụ công khai:** gửi tệp · gửi thoại · gửi sticker · gửi liên kết · đặt lời nhắc · xem lời nhắc · xoá lời nhắc · xem thành viên nhóm · liệt kê kho tài liệu · đọc tài liệu · nhớ người quen · tra sổ người quen · **tìm kiếm web · đọc trang web · hẹn giờ cho nhóm**.
+**27 công cụ công khai** (2.50.0): gửi tệp · tạo tệp · PDF · tạo ảnh/video (Xưởng 2Anh) · gửi thoại · gửi sticker · gửi liên kết · đặt/xem/xoá lời nhắc · thành viên nhóm · **tra lịch sử hội thoại** · liệt kê/đọc kho tài liệu · nhớ người quen · tra sổ người quen · tìm kiếm web · đọc trang web · học thuật · thời tiết · tỷ giá · từ điển · tra loài · thông tin video · tải video · hẹn giờ cho nhóm.
 
 Việc phân nhóm toolset chỉ *giấu* công cụ khỏi danh sách. Rào chắn thật nằm ở tầng thực thi: mỗi công cụ thuộc nhóm chủ nhân được bọc một lớp kiểm tra danh tính người gửi, nên dù công cụ có lọt vào danh sách vì cấu hình sai thì người ngoài gọi vẫn bị từ chối.
 
@@ -695,23 +695,43 @@ Lệnh trong nhóm do **cầu nối** (tiến trình `npm start`) thực thi, kh
 
 Lệnh gạch chéo gốc của Hermes (`/new`, `/clear`, `/reset`, `/stop`, `/compress`, `/model`…) chỉ chủ nhân chạy được; người khác gõ thì nhận câu chặn bằng tiếng Việt. Người ngoài chỉ còn `/help`, `/whoami`, `/status`, `/context`.
 
-### Trí nhớ dài hạn (tự học, tắt mặc định — chỉ máy chủ Linux)
+### Trí nhớ dài hạn (tự học, tắt mặc định)
 
 Bot tự rút điều đáng nhớ từ các cuộc trò chuyện (cách xưng hô, sở thích, việc đang dở) và tự nhắc lại ở lần sau — **tách riêng từng nhóm và từng người**: nhóm này không bao giờ thấy trí nhớ của nhóm khác hay tin nhắn riêng của ai. Hỏi chính xác chuyện cũ ("hôm trước ai gửi file gì") thì bot tra lịch sử tin nhắn thật bằng `zalo_thread_history`, không dựa vào trí nhớ. Chủ nhân dặn "nhớ giúp…" / "quên chuyện… đi" thì bot ghi/xoá đúng trong trí nhớ của cuộc trò chuyện đang nói.
 
-Cần OpenViking chạy trên cùng máy (`127.0.0.1:1933`, `auth_mode: dev`, không khoá API). Bật:
+**Từ 2.52.0 trí nhớ nằm ngay trong kho SQLite của bot** (`data/zalo.sqlite`, cùng tệp với lịch sử trò chuyện) — không cần cài thêm dịch vụ nào, không gọi ra ngoài khi nhớ lại. Bốn bảng lo việc này:
 
-1. `config.yaml` của Hermes: `memory.provider: zalo_memory` (giữ `OPENVIKING_ENDPOINT=http://127.0.0.1:1933` trong `.env`).
-2. Khởi động lại gateway. `npm run doctor` hiện `long-term-memory - bật — zalo_memory…`.
+| Bảng | Giữ gì |
+|---|---|
+| `topics` | Chủ đề nhỏ trong mỗi hội thoại: tên + tóm tắt, mỗi tin thuộc một chủ đề (tin chưa xếp là chủ đề "Chung") |
+| `facts` | Tri thức rời rạc: một sự thật, có kiểu (sở thích · người/việc · quyết định · việc · hạn · sự việc · chủ nhân dặn), **gốc tin nhắn**, độ tin cậy, **hạn hiệu lực** |
+| `profiles` | Hồ sơ gộp theo phạm vi — bản tóm tắt ngắn của cả nhóm/người, bot **tự viết lại** khi có tri thức mới (cách nhau ≥30 phút) |
+| `soft_memories` | Câu tự rút không cần schema cứng (cách nói chuyện, mạch việc đang dở) |
 
-Dashboard › Trí nhớ › **Kho tri thức tự học**: Quản trị và Chủ bot xem, tìm, sửa, xoá (trí nhớ tin nhắn riêng của chủ nhân bot chỉ Quản trị thấy). Quản trị chỉnh chu kỳ rút trí nhớ (30–1440 phút, mặc định 120) và bấm "Rút trí nhớ ngay" (3 lần/kho/ngày). Tắt: đặt `memory.provider: ''` rồi khởi động lại gateway (dữ liệu giữ nguyên). Không bao giờ bật trên Windows.
+Bật:
+
+1. `config.yaml` của Hermes: `memory.provider: zalo_memory`.
+2. Khởi động lại gateway. `npm run doctor` hiện `long-term-memory - bật — zalo_memory, kho SQLite của bot (không cần dịch vụ ngoài)`.
+
+Dashboard › Trí nhớ › **Kho tri thức tự học**: Quản trị và Chủ bot xem, tìm, sửa, xoá (kho tin nhắn riêng của chủ nhân bot chỉ Quản trị thấy). Quản trị chỉnh chu kỳ gói/trích (30–1440 phút, mặc định 120) và bấm "Rút ngay" (3 lần/kho/ngày). Nút **"Quên hết phạm vi này"** xoá trọn trí nhớ của nhóm/người đó (lịch sử tin nhắn thô vẫn giữ — tra lịch sử vẫn đọc được). Tắt: đặt `memory.provider: ''` rồi khởi động lại gateway (dữ liệu giữ nguyên). Không chạy trên Windows.
+
+**Chống mâu thuẫn:** khi một sự thật mới cùng chủ đề một sự thật đang hiệu lực, bot hoặc thay thế (bản cũ đánh dấu `superseded`, còn dòng để tra lại) hoặc xếp vào hàng đợi mâu thuẫn để người duyệt ở dashboard chọn giữ bên nào — không bao giờ âm thầm xoá.
+
+#### Chủ đề nhỏ và tri thức rời rạc (2.51.0)
+
+- **Chủ đề nhỏ** — mỗi hội thoại tự xếp thành các `topics` (tên + tóm tắt ngắn, im ≥ 20 phút bot mới gói để không đốt tiền cho nhóm đang bàn tán gẫu). Xem ở Dashboard › Phiên chat › Thông tin hội thoại (mục "Chủ đề gần đây"), hoặc nhờ bot lọc `zalo_thread_history` theo `topic_id`.
+- **Tri thức rời rạc** — mỗi "fact" là MỘT sự thật, có kiểu, độ tin cậy, hạn hiệu lực (hết hạn tự tắt khỏi recall), và **gốc tin nhắn** (provenance — biết fact đó sinh từ tin nào). Khi recall, bot trộn tối đa 4 fact đang hiệu lực của đúng phạm vi đó vào ngữ cảnh.
+- **Chống mâu thuẫn** — xem hàng đợi mâu thuẫn, Quản trị/Chủ bot duyệt ở Dashboard và chọn giữ bên nào.
+- **"Quên nhóm/người này"** ở Dashboard › Trí nhớ quét dây chuyền: xoá hồ sơ, tri thức, ghi chú và chủ đề của cùng phạm vi. Lịch sử tin nhắn thô vẫn giữ.
+
+Cách vô hiệu hoá luồng gói/trích (nếu muốn giữ SQLite chỉ dùng cho lịch sử): đặt `<HERMES_HOME>/zalo/brain.json` `{"enabled": false}`. `npm run doctor` có hai dòng kiểm: `zalo-brain-jobs` (đủ `brain_jobs.py` / `store_writer.py` ở `<HERMES_HOME>/plugins/zalo_tools`) và `zalo-brain-store` (kho có tìm thấy không). Nếu `zalo-brain-store` báo thiếu `ZALO_SIDECAR_ROOT` thì chạy lại `npm run install:hermes` — biến đó là cách plugin Python tìm kho `data/zalo.sqlite` của cầu nối (plugin nằm ở nhà Hermes, kho nằm ở thư mục mã bot; thiếu biến thì luồng nền im lặng không làm gì).
+
+
 
 ### Kiểm tay sau khi cài (Giai đoạn 7A)
 
-- [ ] Quản trị và Chủ bot đăng nhập: thanh bên đúng 5/4 nhóm, Chủ bot không thấy Second brain; đường dẫn vị trí đúng; điện thoại "Thêm" chia nhóm.
 - [ ] Thương hiệu: đổi dòng phụ → thanh bên đổi ngay.
 - [ ] Liên hệ: có bạn bè; tắt kết nối Zalo → vẫn thấy người nhắn riêng + câu báo; dùng tài khoản phụ gửi lời mời → Đồng ý → Nhật ký có "Đồng ý lời mời kết bạn".
-- [ ] Lịch hẹn: tạo một hẹn giờ nhóm bằng tài khoản phụ → thấy ở "Hẹn giờ cho nhóm" → Tạm dừng → `hermes cron list` thấy paused → Chạy lại → Xoá. Việc gửi Telegram không hiện.
 - [ ] Trí nhớ: sửa một hồ sơ → hỏi bot trong nhóm "bạn biết gì về tôi" thấy nội dung mới. Quản trị sửa một mục MEMORY.md → tệp còn đúng dấu §.
 - [ ] Kho tri thức: tải một PDF → sau ≤ 5 phút bot tìm thấy bằng `zalo_kb_list`; xoá tệp đó.
 - [ ] Insight: chọn nhóm đông → số liệu khớp cảm nhận; Tóm tắt chủ đề → có kết quả trong 1–2 phút; gửi 11 lần/ngày → câu "hết lượt".

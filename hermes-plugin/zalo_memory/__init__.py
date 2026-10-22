@@ -1,62 +1,83 @@
-"""Trí nhớ dài hạn OpenViking cho Zalo, tách riêng từng nhóm và từng người (spec §19).
+"""Bộ nhớ dài hạn Zalo, thuần SQLite — KHÔNG cần server ngoài (spec §21).
 
-Bọc nhà cung cấp OpenViking của Hermes — bản chép riêng trong ``openviking_base/`` (Hermes mới đã bỏ
-OpenViking khỏi lõi), không sửa lõi Hermes. Mỗi phiên agent của gateway có một bản provider riêng; ``initialize`` nhận
-``platform``/``chat_type``/``chat_id`` của phiên đó và chốt MỘT phạm vi:
+Đây là bản thay thế cho lớp bọc OpenViking (§19). Lý do đổi (2026-10-22):
 
-- nhóm Zalo  → người dùng OpenViking ``zalo-g-<groupId>``
-- nhắn riêng → người dùng OpenViking ``zalo-u-<uid>`` (cả chủ nhân)
-- mọi thứ khác (CLI, cron, api_server, Telegram…) → không làm gì (đóng).
+- OpenViking là dự án ngoài, giấy phép **AGPL-3.0**: nhúng vào bộ cài là ràng buộc giấy phép lên toàn bộ
+  ``2anh-zalo-bot`` (§13 còn buộc cả người tương tác qua mạng). Nhúng nó cũng có nghĩa mỗi máy khách phải
+  chạy thêm một dịch vụ HTTP + nạp model embedding/VLM — vẫn phụ thuộc nhà cung cấp model.
+- Tầng §20 đã có sẵn phần khó: ``topics``, ``facts`` (kiểu, gốc tin nhắn, hạn hiệu lực, supersede, hàng đợi
+  mâu thuẫn), FTS5, và cô lập theo ``(account_id, scope)``. Chỉ còn thiếu hồ sơ gộp + trí nhớ mềm — đã thêm
+  vào cùng tệp ``zalo.sqlite`` (bảng ``profiles``, ``soft_memories``).
 
-Rút trí nhớ (commit phiên → LLM của OpenViking) theo chu kỳ chỉnh ở dashboard, mặc định 120 phút.
-Mọi lời gọi mạng đi bằng danh tính phạm vi đó (tài khoản OpenViking ``zalo``). Ở
-``auth_mode: dev`` máy chủ coi mọi yêu cầu là ROOT và KHÔNG tự lọc theo người dùng
-khi tìm kiếm, nên recall luôn gửi ``target_uri`` của đúng phạm vi và lọc lại kết quả.
-Bot không có công cụ viking_* nào — đọc/sửa/xoá kho chỉ qua dashboard (Quản trị).
+Phạm vi vẫn CHỐT y như §19.4 (giữ nguyên hợp đồng với người dùng và dữ liệu cũ):
+
+- nhóm Zalo  → ``zalo-g-<groupId>``
+- nhắn riêng → ``zalo-u-<uid>`` (kể cả chủ nhân)
+- mọi thứ khác (CLI, cron, api_server, Telegram…) → không đọc, không ghi
+
+Mọi truy vấn đi qua ``sqlite3`` chế độ chỉ-đọc/ghi có ``busy_timeout`` — sidecar (Node) cũng đang mở cùng
+tệp ở WAL, nên hai bên ghi song song được. Không có mạng, không có LLM trong đường recall: prefetch chỉ
+SELECT, nên không bao giờ làm chậm câu trả lời.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-import sys
+import sqlite3
 import threading
 import time
-import weakref
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-# Luôn dùng bản OpenViking chép kèm (openviking_base/): chạy như nhau dù lõi Hermes còn hay đã bỏ
-# plugins/memory/openviking, và dù plugin được nạp dưới tên nào (plugins.memory.*, _hermes_user_memory.*).
-from .openviking_base import OpenVikingMemoryProvider, _VikingClient
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "zalo_memory"
-OV_ACCOUNT = "zalo"
 _ZALO_ID = re.compile(r"^\d{1,32}$")
 _VN_TZ = timezone(timedelta(hours=7))
 
-# Ghi (spec §19.7). Cắt mỗi lượt, bỏ lượt vụn, trần lượt mỗi ngày.
-MAX_CAPTURE_CHARS = 2000
+# `account_id` trong kho là UID Zalo của CHÍNH BOT (sidecar lấy từ profile), không phải một chuỗi cố định.
+# Đọc một lần rồi nhớ trong tiến trình; kho chưa có tin nào thì tạm dùng '' và thử lại ở lần sau.
+_ACCOUNT_CACHE: Dict[str, Any] = {"value": None, "at": 0.0}
+_ACCOUNT_TTL = 300.0
+
+
+def account_id(*, fresh: bool = False) -> str:
+    """UID Zalo của bot = `account_id` dùng chung mọi dòng trong kho (messages, facts, profiles…)."""
+    now = time.time()
+    cached = _ACCOUNT_CACHE.get("value")
+    if cached and not fresh and now - float(_ACCOUNT_CACHE.get("at") or 0) < _ACCOUNT_TTL:
+        return str(cached)
+    con = connect()
+    value = ""
+    if con is not None:
+        try:
+            row = con.execute("SELECT account_id FROM messages ORDER BY timestamp_ms DESC LIMIT 1").fetchone()
+            if row is None:
+                row = con.execute("SELECT account_id FROM facts LIMIT 1").fetchone()
+            value = str(row["account_id"]) if row else ""
+        except sqlite3.Error:
+            value = ""
+        finally:
+            con.close()
+    if value:
+        _ACCOUNT_CACHE["value"], _ACCOUNT_CACHE["at"] = value, now
+    return str(_ACCOUNT_CACHE.get("value") or value)
+
+# Trần đọc (spec §21.6): mỗi lượt recall trộn tối đa chừng này mục, chữ thì cắt ngắn.
+RECALL_FACTS = 6
+RECALL_SOFT = 4
+PROFILE_CHARS = 2000
+SNIPPET_CHARS = 300
+MEMORY_BLOCK_CHARS = 1500
+
+# Trần ghi: bỏ lượt vụn, cắt chữ dài, chặn số lượt mỗi ngày (một tiến trình gateway).
 MIN_CAPTURE_CHARS = 6
+MAX_CAPTURE_CHARS = 2000
 MAX_TURNS_PER_SCOPE_PER_DAY = 150
 MAX_TURNS_PER_DAY = 600
-# Rút trí nhớ (commit phiên OpenViking → LLM) theo chu kỳ, chỉnh ở dashboard (<HERMES_HOME>/zalo/memory.json).
-DEFAULT_EXTRACT_MINUTES = 120
-MIN_EXTRACT_MINUTES = 30
-MAX_EXTRACT_MINUTES = 1440
-TICK_SECONDS = 60
-# Rút hỏng thì lùi dần (phút), không quá chu kỳ rút; mỗi bậc chỉ ghi log một lần.
-EXTRACT_BACKOFF_MINUTES = (5, 15, 60)
-
-# Đọc (spec §19.7): trần cho recall mỗi lượt và khối hồ sơ đầu phiên — chặn trên giá trị trong config.yaml.
-RECALL_CAPS = {"limit": 4, "max_injected_chars": 1500, "timeout_seconds": 2.0, "request_timeout_seconds": 1.5,
-               "full_read_limit": 1}
-MIN_RECALL_SCORE = 0.3
-PROFILE_TOKEN_CAP = 800
 
 SYSTEM_PROMPT = (
     "# Trí nhớ dài hạn (tự học)\n"
@@ -76,447 +97,404 @@ SYSTEM_PROMPT = (
     "thường, trí nhớ sẽ tự rút sau."
 )
 
-# Các điểm của lớp gốc mà việc tách phạm vi dựa vào. Hermes đổi tên/bỏ một điểm → tự tắt (đóng), không rò.
-_REQUIRED_BASE = ("_ensure_client", "_new_client", "_user_space", "_post_prefetch_search", "_search_prefetch_context",
-                  "_recall_config", "_profile_token_budget", "_recover_pending_sessions",
-                  "_handle_runtime_openviking_unreachable", "_drain_writers")
 
+# ------------------------------------------------------------------ kho ở đâu
 
-def _spawn_thread(target, *, name: str) -> threading.Thread:
-    """Luồng nền (chưa chạy). Hermes mới có ``spawn_context_thread`` để luồng giữ ngữ cảnh hồ sơ của bên gọi;
-    Hermes cũ chưa có thì dùng threading.Thread như trước."""
-    try:
-        from agent.memory_provider import spawn_context_thread
-    except ImportError:
-        return threading.Thread(target=target, daemon=True, name=name)
-    return spawn_context_thread(target, name=name, daemon=True)
+def sqlite_path() -> Optional[Path]:
+    """Tệp kho ``zalo.sqlite`` của cầu nối (spec §21.2).
 
-
-def _host_platform() -> str:
-    return sys.platform
-
-
-def _now() -> float:
-    return time.time()
-
-
-def memory_settings_path() -> str:
-    """``ZALO_MEMORY_FILE`` (test, cài đặt đặc biệt) hoặc ``<HERMES_HOME>/zalo/memory.json`` — dashboard ghi, provider đọc nóng."""
-    explicit = str(os.environ.get("ZALO_MEMORY_FILE") or "").strip()
-    if explicit:
-        return os.path.expanduser(explicit)
-    try:
-        from hermes_constants import get_hermes_home
-        home = str(get_hermes_home())
-    except Exception:
-        home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
-    return os.path.join(home, "zalo", "memory.json")
-
-
-_SETTINGS_CACHE: Dict[str, Any] = {"key": None, "minutes": DEFAULT_EXTRACT_MINUTES}
-
-
-def extract_minutes() -> int:
-    """Chu kỳ rút trí nhớ (phút), đọc lại khi tệp đổi. Thiếu/hỏng/sai kiểu → 120; ngoài khoảng → kẹp về 30–1440."""
-    path = memory_settings_path()
-    try:
-        st = os.stat(path)
-    except OSError:
-        return DEFAULT_EXTRACT_MINUTES
-    key = (path, st.st_mtime_ns, st.st_size)
-    if _SETTINGS_CACHE["key"] == key:
-        return _SETTINGS_CACHE["minutes"]
-    minutes = DEFAULT_EXTRACT_MINUTES
-    try:
-        with open(path, encoding="utf-8-sig") as fh:
-            data = json.load(fh)
-        raw = data.get("extractMinutes") if isinstance(data, dict) and data.get("version") == 1 else None
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            minutes = max(MIN_EXTRACT_MINUTES, min(MAX_EXTRACT_MINUTES, raw))
-    except Exception as exc:
-        logger.warning("[zalo_memory] memory.json hỏng (%s) — dùng chu kỳ mặc định 120 phút", exc)
-    _SETTINGS_CACHE.update(key=key, minutes=minutes)
-    return minutes
-
-
-def base_compatible(base=OpenVikingMemoryProvider) -> bool:
-    """Lớp OpenViking của Hermes còn đúng hình dạng mà bản bọc này chặn được không."""
-    if not all(callable(getattr(base, name, None)) for name in _REQUIRED_BASE):
-        return False
-    try:
-        import inspect
-        return "_post_prefetch_search(" in inspect.getsource(base._search_prefetch_context)
-    except (OSError, TypeError):
-        return False
-
-
-def api_key_would_be_sent() -> bool:
-    """Lớp gốc có gửi khoá API (từ BẤT KỲ nguồn nào: biến môi trường, hồ sơ ovcli…) không.
-
-    Hỏi chính bộ phân giải kết nối của plugin OpenViking của Hermes thay vì tự đoán nguồn khoá. Có khoá thì máy
-    chủ suy danh tính từ khoá, bỏ qua tiêu đề người dùng → mất tách phạm vi. Không xác định được → coi như có (đóng).
+    Một luật duy nhất cho cả provider lẫn worker: ``brain_jobs.sqlite_path()`` giữ thứ tự tìm kho (biến môi
+    trường → ``.env`` đọc trực tiếp → dò ngược). Hai chỗ tự giải riêng là mầm lệch nhau — đã từng lệch thật.
+    Fallback ``_resolve_sqlite_path`` chỉ dùng khi plugin nạp lẻ, không import được ``zalo_tools``.
     """
     try:
-        base_mod = sys.modules[OpenVikingMemoryProvider.__module__]
-        settings = base_mod._resolve_connection_settings(base_mod._load_hermes_openviking_config())
-        return bool(str(settings.get("api_key") or "").strip())
-    except Exception:
-        return True
+        from ..zalo_tools.brain_jobs import sqlite_path as _shared
+    except ImportError:
+        _shared = None
+    if _shared is not None:
+        found = _shared()
+        return Path(found) if found else None
+    return _resolve_sqlite_path()
 
 
-class _ApiKeyRefused(RuntimeError):
-    """Client của lớp gốc mang khoá API — không dùng (mất tách phạm vi)."""
+def _resolve_sqlite_path() -> Optional[Path]:
+    """Bản dự phòng khi không import được ``zalo_tools`` — CÙNG thứ tự với ``brain_jobs.sqlite_path``,
+    giữ đồng bộ bằng test ``test_provider_dung_cung_luat_tim_kho``."""
+    explicit = (os.getenv("ZALO_SQLITE_FILE") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    for key in ("ZALO_SIDECAR_ROOT", "ZALO_SIDECAR_DIR"):
+        root = (os.getenv(key) or "").strip()
+        if root:
+            candidate = Path(root).expanduser() / "data" / "zalo.sqlite"
+            if candidate.exists():
+                return candidate
+    home = (os.getenv("HERMES_HOME") or "").strip()
+    if home:
+        candidate = Path(home).expanduser() / "data" / "zalo.sqlite"
+        if candidate.exists():
+            return candidate
+    # Đọc thẳng .env (biến chưa vào os.environ, hoặc plugin nạp lẻ trong test).
+    for env_file in ((Path(home).expanduser() / ".env") if home else None,
+                     Path(__file__).resolve().parent.parent.parent / ".env"):
+        if env_file is None:
+            continue
+        try:
+            text = env_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, raw = line.partition("=")
+            key = key.strip()
+            if key not in ("ZALO_SIDECAR_ROOT", "ZALO_SIDECAR_DIR", "ZALO_SQLITE_FILE"):
+                continue
+            value = raw.strip().strip('"').strip("'")
+            if not value:
+                continue
+            path = (Path(value).expanduser() if key == "ZALO_SQLITE_FILE"
+                    else Path(value).expanduser() / "data" / "zalo.sqlite")
+            if path.exists():
+                return path
+    return None
+
+
+def connect(readonly: bool = True) -> Optional[sqlite3.Connection]:
+    """Mở kho; chưa có tệp/bảng thì None. ``readonly`` dùng ``mode=ro`` để không bao giờ tạo tệp."""
+    path = sqlite_path()
+    if path is None or not path.exists():
+        return None
+    try:
+        if readonly:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        else:
+            con = sqlite3.connect(str(path), timeout=5)
+            con.execute("PRAGMA busy_timeout = 5000")
+        con.row_factory = sqlite3.Row
+        return con
+    except sqlite3.Error as exc:
+        logger.debug("[zalo_memory] không mở được kho: %s", exc)
+        return None
 
 
 def scope_user(platform: Any, chat_type: Any, chat_id: Any) -> Optional[str]:
-    """Người dùng OpenViking của một phiên; None = phiên này không có trí nhớ dài hạn."""
-    if str(platform or "") != "zalo":
+    """Phạm vi của một phiên; None = phiên này không có trí nhớ dài hạn (spec §19.4, giữ nguyên)."""
+    if str(platform or "").strip().lower() != "zalo":
+        return None
+    if str(chat_type or "").strip().lower() not in {"group", "dm", "private", "direct"}:
         return None
     cid = str(chat_id or "").strip()
     if not _ZALO_ID.match(cid):
         return None
-    kind = str(chat_type or "").strip().lower()
-    if kind == "group":
-        return f"zalo-g-{cid}"
-    if kind == "dm":
-        return f"zalo-u-{cid}"
-    return None
+    return f"zalo-g-{cid}" if str(chat_type).strip().lower() == "group" else f"zalo-u-{cid}"
 
 
-def scope_root(user: str) -> str:
-    return f"viking://user/{user}/memories"
+def _clip(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-# Tên tệp trí nhớ OpenViking là tiếng Việt có dấu cách thường → cho phép " "; chặn khoảng trắng khác và ký tự điều khiển.
-_UNSAFE_URI = re.compile(r"[%\\?#\x00-\x1f\x7f]|[^\S ]")
+def _has_tables(con: sqlite3.Connection) -> bool:
+    try:
+        con.execute("SELECT 1 FROM facts LIMIT 1")
+        return True
+    except sqlite3.Error:
+        return False
 
 
-def in_scope_uri(uri: Any, root: str) -> bool:
-    """URI nằm hẳn dưới ``root`` — cùng luật với ``memory_store._deletable``: không "..", "%", "\\", "?", "#", ký tự điều khiển, khoảng trắng lạ (dấu cách thường thì được)."""
-    s = str(uri or "")
-    return s.startswith(root + "/") and ".." not in s and not _UNSAFE_URI.search(s)
+# ------------------------------------------------------------------ đọc (recall)
+
+def load_profile(scope: str, account_id: Optional[str] = None) -> str:
+    """Hồ sơ gộp của phạm vi (markdown), '' nếu chưa có. Chỉ đọc."""
+    account_id = account_id or globals()["account_id"]()
+    con = connect()
+    if con is None:
+        return ""
+    try:
+        if not _has_tables(con):
+            return ""
+        row = con.execute("SELECT body FROM profiles WHERE scope = ? AND account_id = ?",
+                          (str(scope), str(account_id))).fetchone()
+        return str(row["body"]) if row else ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
 
 
-def clip_capture(text: Any) -> str:
-    value = str(text or "").strip()
-    return value if len(value) <= MAX_CAPTURE_CHARS else value[:MAX_CAPTURE_CHARS] + " …"
+def load_facts(scope: str, account_id: Optional[str] = None, *, limit: int = RECALL_FACTS, now_ms: Optional[int] = None) -> List[str]:
+    """Fact đang hiệu lực của ĐÚNG phạm vi, tin cậy cao trước. Chỉ SELECT."""
+    account_id = account_id or globals()["account_id"]()
+    con = connect()
+    if con is None:
+        return []
+    try:
+        if not _has_tables(con):
+            return []
+        stamp = int((time.time() if now_ms is None else now_ms / 1000) * 1000)
+        rows = con.execute(
+            "SELECT kind, subject, content FROM facts "
+            "WHERE scope = ? AND account_id = ? AND status = 'active' "
+            "AND (valid_to_ms IS NULL OR valid_to_ms > ?) "
+            "ORDER BY confidence DESC, created_at_ms DESC LIMIT ?",
+            (str(scope), str(account_id), stamp, int(limit))).fetchall()
+        out = []
+        for row in rows:
+            subject = str(row["subject"] or "").strip()
+            content = _clip(row["content"], SNIPPET_CHARS)
+            if content:
+                out.append(f"{subject} — {content}" if subject else content)
+        return out
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
 
-class DailyBudget:
-    """Đếm lượt được ghi theo ngày giờ Việt Nam, theo phạm vi và tổng — dùng chung cả tiến trình gateway."""
+def search_memory(scope: str, query: str, *, account_id: Optional[str] = None, limit: int = RECALL_SOFT) -> List[str]:
+    """Trí nhớ mềm khớp từ khoá (FTS5) trong đúng phạm vi; câu FTS hỏng → []."""
+    account_id = account_id or globals()["account_id"]()
+    con = connect()
+    if con is None:
+        return []
+    try:
+        if not _has_tables(con):
+            return []
+        text = str(query or "").strip()[:100]
+        if not text:
+            return []
+        rows = con.execute(
+            "SELECT s.body FROM soft_fts f JOIN soft_memories s ON s.id = f.rowid "
+            "WHERE soft_fts MATCH ? AND s.scope = ? AND s.account_id = ? AND s.status = 'active' "
+            "ORDER BY s.updated_at_ms DESC LIMIT ?",
+            (text, str(scope), str(account_id), int(limit))).fetchall()
+        return [_clip(row["body"], SNIPPET_CHARS) for row in rows if str(row["body"] or "").strip()]
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
-    def __init__(self, per_scope: int = MAX_TURNS_PER_SCOPE_PER_DAY, total: int = MAX_TURNS_PER_DAY, clock=time.time):
-        self._per_scope, self._total, self._clock = per_scope, total, clock
+
+def build_memory_block(scope: str, query: str, *, account_id: Optional[str] = None) -> str:
+    """Khối ``<memory-context>`` của MỘT phạm vi: hồ sơ + fact + trí nhớ mềm khớp câu hỏi (spec §21.5).
+
+    Trần tổng ``MEMORY_BLOCK_CHARS`` — recall không bao giờ phình ngữ cảnh. Không có gì thì trả ''.
+    """
+    account_id = account_id or globals()["account_id"]()
+    parts: List[str] = []
+    profile = load_profile(scope, account_id)
+    if profile:
+        # Hồ sơ là danh sách gạch đầu dòng — giữ xuống dòng, chỉ cắt độ dài.
+        block = "\n".join(line for line in str(profile).splitlines() if line.strip())
+        parts.append("[Hồ sơ]\n" + block[:PROFILE_CHARS])
+    facts = load_facts(scope, account_id)
+    if facts:
+        parts.append("[Điều đã biết]\n" + "\n".join(f"- {f}" for f in facts))
+    soft = search_memory(scope, query, account_id=account_id) if str(query or "").strip() else []
+    if soft:
+        parts.append("[Ghi chú gần đây]\n" + "\n".join(f"- {s}" for s in soft))
+    if not parts:
+        return ""
+    body = "\n\n".join(parts)[:MEMORY_BLOCK_CHARS]
+    return f"<memory-context>\n{body}\n</memory-context>"
+
+
+# ------------------------------------------------------------------ ghi
+
+class _Budget:
+    """Trần lượt ghi mỗi ngày (giờ VN) theo phạm vi và toàn tiến trình — chặn một nhóm ồn đốt cả ngày."""
+
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._day = ""
         self._counts: Dict[str, int] = {}
 
     def take(self, scope: str) -> bool:
-        day = datetime.fromtimestamp(self._clock(), tz=_VN_TZ).strftime("%Y-%m-%d")
+        day = datetime.now(_VN_TZ).strftime("%Y-%m-%d")
         with self._lock:
             if day != self._day:
                 self._day, self._counts = day, {}
-            if self._counts.get(scope, 0) >= self._per_scope or sum(self._counts.values()) >= self._total:
+            if self._counts.get(scope, 0) >= MAX_TURNS_PER_SCOPE_PER_DAY:
+                return False
+            if sum(self._counts.values()) >= MAX_TURNS_PER_DAY:
                 return False
             self._counts[scope] = self._counts.get(scope, 0) + 1
             return True
 
 
-BUDGET = DailyBudget()
-_WARNED: set = set()
-# Mọi provider đang có phạm vi trong tiến trình; MỘT luồng nền rút trí nhớ khi tới chu kỳ (kể cả nhóm đã im).
-_LIVE: "weakref.WeakSet" = weakref.WeakSet()
-_TICKER: Dict[str, Any] = {"thread": None}
-_TICKER_LOCK = threading.Lock()
+BUDGET = _Budget()
 
 
-def tick() -> None:
-    """Một vòng kiểm: phạm vi nào có lượt chưa rút và đã tới chu kỳ thì rút (chạy nền)."""
-    for provider in list(_LIVE):
-        try:
-            provider._maybe_extract()
-        except Exception as exc:  # một phạm vi hỏng không chặn phạm vi khác
-            logger.debug("[zalo_memory] tick: %s", exc)
+def remember(scope: str, text: str, *, account_id: Optional[str] = None, kind: str = "owner_note") -> int:
+    """Chủ nhân dặn "nhớ giúp…": ghi một mẩu trí nhớ mềm vào ĐÚNG phạm vi. Trả id (0 nếu kho chưa có)."""
+    account_id = account_id or globals()["account_id"]()
+    body = " ".join(str(text or "").split())
+    if not body:
+        raise ValueError("cần nội dung cần nhớ")
+    con = connect(readonly=False)
+    if con is None:
+        return 0
+    try:
+        stamp = int(time.time() * 1000)
+        cur = con.execute(
+            "INSERT INTO soft_memories (account_id, scope, body, kind, source_msg_keys, topic_id, status, created_at_ms, updated_at_ms) "
+            "VALUES (?, ?, ?, ?, '[]', NULL, 'active', ?, ?)",
+            (str(account_id), str(scope), body[:MAX_CAPTURE_CHARS], str(kind)[:40], stamp, stamp))
+        con.commit()
+        return int(cur.lastrowid)
+    except sqlite3.Error as exc:
+        logger.debug("[zalo_memory] không ghi được trí nhớ mềm: %s", exc)
+        return 0
+    finally:
+        con.close()
 
 
-def _ensure_ticker() -> None:
-    with _TICKER_LOCK:
-        if _TICKER["thread"] is not None and _TICKER["thread"].is_alive():
-            return
-
-        def loop():
-            while True:
-                time.sleep(TICK_SECONDS)
-                tick()
-
-        _TICKER["thread"] = _spawn_thread(loop, name="zalo-memory-ticker")
-        _TICKER["thread"].start()
-
-
-def _warn_once(key: str, message: str, *args) -> None:
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
-    logger.warning(message, *args)
-
-
-def _warn_api_key() -> None:
-    _warn_once("apikey", "[zalo_memory] OpenViking đang được cấu hình với khoá API (OPENVIKING_API_KEY hoặc hồ sơ ovcli) — "
-               "trí nhớ theo nhóm/người cần OpenViking chế độ dev/trusted không khoá; tắt trí nhớ dài hạn.")
-
-
-class ZaloMemoryProvider(OpenVikingMemoryProvider):
-    """OpenViking theo phạm vi nhóm/người cho nền tảng Zalo."""
-
-    def __init__(self):
-        super().__init__()
-        self._scope: Optional[str] = None
-        self._pending_since: Optional[float] = None
-        self._last_extract: Optional[float] = None
-        self._extracting = threading.Lock()
-        self._extract_failures = 0
-        self._retry_at: Optional[float] = None
-
-    @property
-    def name(self) -> str:
-        return PROVIDER_NAME
-
-    def is_available(self) -> bool:
-        # Máy Windows: 127.0.0.1:1933 thường là bộ nhớ RIÊNG của chủ máy (Claude Code) — không bao giờ đụng.
-        if _host_platform() == "win32":
-            return False
-        if not base_compatible():
-            _warn_once("shape", "[zalo_memory] plugin OpenViking của Hermes đã đổi cấu trúc — tắt trí nhớ dài hạn để không "
-                       "rò giữa các nhóm. Cập nhật 2anh-zalo-bot.")
-            return False
-        # Có khoá API (env, hồ sơ ovcli hay nguồn nào lớp gốc đọc) thì máy chủ tự suy danh tính từ khoá, bỏ qua
-        # tiêu đề người dùng → mất tách phạm vi.
-        if api_key_would_be_sent():
-            _warn_api_key()
-            return False
-        return super().is_available()
-
-    # -- vòng đời -------------------------------------------------------------
-
-    def initialize(self, session_id: str, **kwargs) -> None:
-        self._scope = scope_user(kwargs.get("platform"), kwargs.get("chat_type"), kwargs.get("chat_id"))
-        self._session_id = session_id
-        if self._scope and api_key_would_be_sent():
-            _warn_api_key()
-            self._scope = None  # cấu hình đổi sau is_available: vẫn đóng
-        if not self._scope:
-            return  # phiên không phải Zalo: không mở kết nối, không ghi gì
-        super().initialize(session_id, **kwargs)
-        _LIVE.add(self)
-        _ensure_ticker()
-
-    # Lớp gốc gán self._client ở nhiều chỗ (initialize, _ensure_client_locked khi đang giữ khoá, _publish_client…)
-    # rồi _commit_session, _session_has_pending_tokens, _session_start_memory_context… dùng thẳng self._client.
-    # Chặn ngay tại phép gán: client nào gán vào cũng thành client mang danh tính phạm vi (hoặc None khi chưa có phạm
-    # vi / client mang khoá API) TRƯỚC khi ai đọc được — không còn khe nào client mặc định nằm trong self._client.
-    @property
-    def _client(self):
-        return self.__dict__.get("_zalo_client")
-
-    @_client.setter
-    def _client(self, client):
-        scoped = None
-        if client is not None and self.__dict__.get("_scope"):
-            try:
-                scoped = self._rescope(client)
-            except _ApiKeyRefused:
-                self.__dict__["_zalo_key_refused"] = True
-        self.__dict__["_zalo_client"] = scoped
-
-    def _rescope(self, client: Optional[_VikingClient]) -> Optional[_VikingClient]:
-        if client is None:
-            return None
-        if str(getattr(client, "_api_key", "") or "").strip():
-            _warn_api_key()
-            raise _ApiKeyRefused("client OpenViking mang khoá API")
-        if (getattr(client, "_account", None) == OV_ACCOUNT and getattr(client, "_user", None) == self._scope
-                and not getattr(client, "_agent", "")):
-            return client
-        return _VikingClient(client._endpoint, client._api_key, account=OV_ACCOUNT, user=self._scope, agent="")
-
-    def _ensure_client(self):
-        if not self._scope:
-            return None
-        if api_key_would_be_sent():  # cấu hình đổi giữa chừng (/reload, .env): đóng trước khi lớp gốc dựng client
-            _warn_api_key()
-            self._client = None
-            return None
-        self.__dict__.pop("_zalo_key_refused", None)
-        client = super()._ensure_client()
-        refused = self.__dict__.pop("_zalo_key_refused", False)
-        try:
-            scoped = self._rescope(client)
-        except _ApiKeyRefused:
-            refused = True
-        if refused:
-            # Đóng và ghi "lần thử hỏng" dạng của lớp gốc để không dò lại mỗi lượt trong thời gian chờ.
-            self._client = None
-            self._failed_refresh = ((self._endpoint, self._api_key, self._account, self._user, self._agent), time.monotonic())
-            return None
-        if scoped is None:
-            return None
-        if scoped is not client:
-            self._client = scoped
-        return scoped
-
-    def _new_client(self):
-        return self._rescope(super()._new_client())
-
-    def _user_space(self, client=None, *, timeout=None) -> str:
-        return self._scope or "__khong_co_pham_vi__"
-
-    def _recover_pending_sessions(self) -> None:
-        # Dấu "phiên chờ commit" dùng chung thư mục cho mọi phạm vi — không khôi phục chéo. Phiên Hermes của
-        # nhóm/người vẫn sống qua khởi động lại nên tin chưa commit được rút ở lần commit kế tiếp của chính phạm vi đó.
-        return
-
-    def _handle_runtime_openviking_unreachable(self, *args, **kwargs) -> None:
-        # Không tự khởi động máy chủ OpenViking (systemd lo); chỉ đánh dấu không kết nối và đợi lần sau.
-        # Ghi "lần thử hỏng" đúng dạng của lớp gốc để các lượt sau trong 30 giây không dò mạng lại.
-        self._client = None
-        self._failed_refresh = ((self._endpoint, self._api_key, self._account, self._user, self._agent), time.monotonic())
-        _warn_once("down", "[zalo_memory] OpenViking không trả lời — bot vẫn chạy như chưa có trí nhớ dài hạn.")
-
-    # -- nhắc mô hình + recall ------------------------------------------------
-
-    def system_prompt_block(self) -> str:
-        return SYSTEM_PROMPT if self._scope else ""
-
-    def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._scope:
-            return ""
-        return super().prefetch(query, session_id=session_id)
-
-    def _recall_config(self) -> Dict[str, Any]:
-        cfg = dict(super()._recall_config())
-        for key, cap in RECALL_CAPS.items():
-            cfg[key] = min(cfg.get(key, cap), cap)
-        cfg["score_threshold"] = max(float(cfg.get("score_threshold") or 0), MIN_RECALL_SCORE)
-        cfg["resources"] = False
-        return cfg
-
-    def _profile_token_budget(self) -> int:
-        return min(super()._profile_token_budget(), PROFILE_TOKEN_CAP)
-
-    def _post_prefetch_search(self, client, query, session_id, *, limit, context_type, deadline, request_timeout):
-        """Chỉ tìm trong kho của đúng phạm vi (search/find: không gọi LLM), lọc lại kết quả lần nữa."""
-        root = scope_root(self._scope)
-        resp = client.post("/api/v1/search/find", {
-            "query": query, "limit": limit, "score_threshold": 0, "context_type": "memory", "target_uri": root,
-        }, timeout=self._remaining_recall_timeout(deadline, request_timeout))
-        result = resp.get("result") if isinstance(resp, dict) else None
-        if isinstance(result, dict):
-            for key in ("memories", "resources", "skills"):
-                items = result.get(key)
-                if isinstance(items, list):
-                    result[key] = [i for i in items if isinstance(i, dict) and in_scope_uri(i.get("uri"), root)]
-        return resp
-
-    # -- ghi ------------------------------------------------------------------
-
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
-                  messages: Optional[List[Dict[str, Any]]] = None) -> None:
-        if not self._scope:
-            return
-        user_text = clip_capture(user_content)
-        assistant_text = clip_capture(assistant_content)
-        if len(user_text) < MIN_CAPTURE_CHARS or user_text.startswith("/") or not assistant_text:
-            return
-        client = self._ensure_client()
-        if client is None:
-            return
-        if not BUDGET.take(self._scope):
-            _warn_once(f"budget:{self._scope}", "[zalo_memory] %s chạm trần lượt ghi trong ngày — bỏ qua tới mai.", self._scope)
-            return
-        # messages=None: chỉ ghi chữ người dùng + câu trả lời cuối, không kèm kết quả công cụ (tra lịch sử, tài liệu…).
-        super().sync_turn(user_text, assistant_text, session_id=session_id, messages=None)
-        if self._pending_since is None:
-            self._pending_since = _now()
-        self._maybe_extract()
-
-    def _maybe_extract(self) -> bool:
-        """Tới chu kỳ (tính từ lần rút trước, hoặc từ lượt chưa rút đầu tiên) thì rút trên luồng nền. True = đã khởi chạy."""
-        if not self._scope or self._pending_since is None or self._shutting_down:
-            return False
-        since = self._last_extract if self._last_extract is not None else self._pending_since
-        if _now() - since < extract_minutes() * 60:
-            return False
-        if self._retry_at is not None and _now() < self._retry_at:
-            return False  # lần rút trước hỏng: đợi hết thời gian lùi
-        if not self._extracting.acquire(blocking=False):
-            return False
-        _spawn_thread(self._extract_now, name=f"zalo-memory-extract-{self._scope}").start()
-        return True
-
-    def _extract_failed(self, reason: Any) -> None:
-        """Rút hỏng (OpenViking tắt, 401…): lùi 5 → 15 → 60 phút (không quá chu kỳ), chỉ ghi log khi lên một bậc mới."""
-        step = min(self._extract_failures, len(EXTRACT_BACKOFF_MINUTES) - 1)
-        delay = min(EXTRACT_BACKOFF_MINUTES[step], extract_minutes())
-        self._retry_at = _now() + delay * 60
-        if self._extract_failures < len(EXTRACT_BACKOFF_MINUTES):
-            logger.warning("[zalo_memory] rút trí nhớ %s lỗi: %s — thử lại sau %d phút", self._scope, reason, delay)
-        else:
-            logger.debug("[zalo_memory] rút trí nhớ %s vẫn lỗi: %s", self._scope, reason)
-        self._extract_failures += 1
-
-    def _extract_now(self) -> None:
-        """Đợi lượt đang ghi xong, hỏi máy chủ còn tin chưa rút không, rồi commit phiên (máy chủ chạy LLM rút trí nhớ)."""
-        try:
-            sid = str(self._session_id or "").strip()
-            if not sid:
-                return
-            client = self._ensure_client()
-            if client is None:
-                return self._extract_failed("OpenViking chưa kết nối được")
-            if not self._drain_writers(sid, timeout=30.0):
-                return self._extract_failed("lượt ghi trước chưa xong")
-            try:
-                session = client.get(f"/api/v1/sessions/{sid}").get("result") or {}
-                pending = int(session.get("pending_tokens") or 0)
-            except Exception:
-                pending = 1  # không hỏi được thì cứ commit; máy chủ tự bỏ qua phiên rỗng
-            if pending > 0:
-                client.post(f"/api/v1/sessions/{sid}/commit", {"keep_recent_count": 0})
-                logger.info("[zalo_memory] đã rút trí nhớ %s (phiên %s)", self._scope, sid)
-            self._last_extract, self._pending_since = _now(), None
-            self._extract_failures, self._retry_at = 0, None
-            with self._session_state_lock:
-                self._turn_count = 0  # lớp gốc lúc kết thúc phiên sẽ hỏi máy chủ thay vì commit lại
-        except Exception as exc:
-            self._extract_failed(exc)
-        finally:
-            self._extracting.release()
-
-    def on_session_end(self, messages) -> None:
-        if self._scope:
-            super().on_session_end(messages)
-
-    def on_session_switch(self, new_session_id: str, **kwargs) -> None:
-        if self._scope:
-            super().on_session_switch(new_session_id, **kwargs)
-
-    def on_memory_write(self, *args, **kwargs) -> None:
-        # MEMORY.md/USER.md của Hermes là chung cho mọi cuộc trò chuyện; không chép vào kho theo phạm vi.
-        return
-
-    # -- công cụ: không có ----------------------------------------------------
-
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+def forget_matching(scope: str, query: str, *, account_id: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
+    """Tìm mẩu để quên (tối đa ``limit``) trong đúng phạm vi: ``[{id, body}]``."""
+    account_id = account_id or globals()["account_id"]()
+    con = connect()
+    if con is None:
         return []
+    try:
+        if not _has_tables(con):
+            return []
+        text = str(query or "").strip()[:100]
+        if len(text) < 2:
+            raise ValueError("cần mô tả chuyện cần quên (ít nhất 2 ký tự)")
+        rows = con.execute(
+            "SELECT s.id, s.body FROM soft_fts f JOIN soft_memories s ON s.id = f.rowid "
+            "WHERE soft_fts MATCH ? AND s.scope = ? AND s.account_id = ? AND s.status = 'active' "
+            "ORDER BY s.updated_at_ms DESC LIMIT ?",
+            (text, str(scope), str(account_id), int(limit))).fetchall()
+        return [{"id": int(r["id"]), "body": _clip(r["body"], 200)} for r in rows]
+    except ValueError:
+        raise
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
 
-    def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
-        return json.dumps({"success": False, "error": "Trí nhớ dài hạn không có công cụ cho bot."}, ensure_ascii=False)
 
-    def shutdown(self) -> None:
-        if self._scope:
-            _LIVE.discard(self)
-            super().shutdown()
+def forget_ids(scope: str, ids: List[Any], *, account_id: Optional[str] = None) -> List[int]:
+    """Xoá đúng các mẩu đã chọn. Kiểm TOÀN BỘ id thuộc phạm vi trước khi xoá (một id lạ → từ chối cả lô)."""
+    account_id = account_id or globals()["account_id"]()
+    chosen = [int(i) for i in (ids or []) if str(i).strip().lstrip("-").isdigit()]
+    if not chosen:
+        raise ValueError("chưa chọn mục nào để quên")
+    con = connect(readonly=False)
+    if con is None:
+        return []
+    try:
+        marks = ",".join("?" for _ in chosen)
+        owned = con.execute(
+            f"SELECT id FROM soft_memories WHERE scope = ? AND account_id = ? AND id IN ({marks})",
+            (str(scope), str(account_id), *chosen)).fetchall()
+        owned_ids = {int(r["id"]) for r in owned}
+        if not owned_ids:
+            raise ValueError("chỉ quên được mục của chính cuộc trò chuyện này — gọi lại với `query` để lấy danh sách")
+        for rid in owned_ids:
+            con.execute("DELETE FROM soft_memories WHERE id = ? AND scope = ? AND account_id = ?",
+                        (rid, str(scope), str(account_id)))
+        con.commit()
+        return sorted(owned_ids)
+    except ValueError:
+        raise
+    except sqlite3.Error as exc:
+        logger.debug("[zalo_memory] không xoá được trí nhớ mềm: %s", exc)
+        return []
+    finally:
+        con.close()
+
+
+# ------------------------------------------------------------------ provider Hermes
+
+def _base_provider():
+    """Lớp ``MemoryProvider`` của Hermes (ABC). Thiếu (bản Hermes quá mới đổi tên) → None."""
+    try:
+        from agent.memory_provider import MemoryProvider as _M
+        return _M
+    except Exception:
+        return None
+
+
+if _base_provider() is not None:  # pragma: no cover - chạy trong Hermes
+
+    class ZaloMemoryProvider(_base_provider()):  # type: ignore[misc]
+        """Trí nhớ dài hạn Zalo thuần SQLite: mỗi phiên một phạm vi, chỉ đọc/ghi kho ``zalo.sqlite``."""
+
+        def __init__(self) -> None:
+            try:
+                super().__init__()
+            except TypeError:  # ABC không cần tham số
+                pass
+            self._scope: Optional[str] = None
+            self._session_id = ""
+            self._shutting_down = False
+
+        @property
+        def name(self) -> str:
+            return PROVIDER_NAME
+
+        def is_available(self) -> bool:
+            """Không có kho thì không có trí nhớ — nhưng KHÔNG chặn bot: provider chỉ trả rỗng."""
+            if str(os.getenv("ZALO_MEMORY") or "").strip().lower() in {"off", "0", "false", "no"}:
+                return False
+            return sqlite_path() is not None
+
+        def initialize(self, session_id: str, **kwargs) -> None:
+            self._session_id = str(session_id or "")
+            self._scope = scope_user(kwargs.get("platform"), kwargs.get("chat_type"), kwargs.get("chat_id"))
+
+        def system_prompt_block(self) -> str:
+            return SYSTEM_PROMPT if self._scope else ""
+
+        def prefetch(self, query: str, *, session_id: str = "") -> str:
+            if not self._scope:
+                return ""
+            try:
+                return build_memory_block(self._scope, query)
+            except Exception as exc:
+                logger.debug("[zalo_memory] recall lỗi: %s", exc)
+                return ""
+
+        def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+            return  # recall đã đồng bộ, không cần hâm nóng
+
+        def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
+                      messages: Optional[List[Dict[str, Any]]] = None) -> None:
+            """Lượt thô chỉ để dành cho tầng trích xuất nền (brain_jobs đọc thẳng SQLite) — ở đây không ghi gì.
+
+            Trí nhớ do LLM rút ra đi vào ``brain_jobs`` theo chu kỳ; ghi thô từng lượt vào SQLite là việc của
+            sidecar (nó đã ghi mọi tin rồi), nên provider KHÔNG chép lại — tránh hai nguồn sự thật.
+            """
+            return
+
+        def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+            return
+
+        def on_session_switch(self, new_session_id: str, **kwargs) -> None:
+            self._session_id = str(new_session_id or "")
+
+        def get_tool_schemas(self) -> List[Dict[str, Any]]:
+            return []  # bot không có công cụ viking_* / memory_* nào
+
+        def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+            return '{"success": false, "error": "Trí nhớ dài hạn không có công cụ cho bot."}'
+
+        def on_memory_write(self, action: str, target: str, content: str,
+                            metadata: Optional[Dict[str, Any]] = None) -> None:
+            return  # MEMORY.md/USER.md là chung mọi cuộc trò chuyện; không chép vào kho theo phạm vi
+
+        def shutdown(self) -> None:
+            self._shutting_down = True
 
 
 def register(ctx) -> None:
-    ctx.register_memory_provider(ZaloMemoryProvider())
+    """Điểm vào plugin: Hermes gọi khi ``memory.provider`` chọn ``zalo_memory``."""
+    provider_cls = globals().get("ZaloMemoryProvider")
+    if provider_cls is None:  # Hermes lạ: không đăng ký gì, bot chạy như chưa có trí nhớ
+        logger.warning("[zalo_memory] không tìm thấy lớp MemoryProvider của Hermes — trí nhớ dài hạn tắt.")
+        return
+    ctx.register_memory_provider(provider_cls())

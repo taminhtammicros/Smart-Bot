@@ -1198,15 +1198,28 @@ async def zalo_thread_history(args: Dict[str, Any], **_kw) -> str:
     limit = _bounded_int(args.get("limit"), 20, 1, THREAD_HISTORY_MAX_LIMIT)
     query = str(args.get("query") or "").strip()[:100]
     sender = str(args.get("sender") or "").strip()[:60]
+    # lọc theo chủ đề (spec §20.2): topic_id tuỳ chọn từ mô hình; -1 = chủ đề Chung (tin chưa gán).
+    try:
+        topic_id = int(args.get("topic_id"))
+    except (TypeError, ValueError):
+        topic_id = None
+    if topic_id is not None and topic_id < -1:
+        topic_id = None
     since_ms = int(time.time() * 1000) - days * 86_400_000
     ack = await adapter.search_history(
-        thread_id, query=query, sender=sender, since_ms=since_ms, limit=limit,
+        thread_id, query=query, sender=sender, since_ms=since_ms, limit=limit, topic_id=topic_id,
         metadata={"chat_type": "group" if turn.get("is_group") else "dm"},
     )
     if not ack or not ack.get("ok"):
         return _err((ack or {}).get("error", "không đọc được lịch sử Zalo"))
     lines: List[str] = []
     size = 0
+    # Chủ đề của kết quả (spec §20.2): sidecar trả tên khi cả lô cùng một chủ đề — dán nhãn để bot nêu rõ.
+    topic_name = str((ack.get("result") or {}).get("topic") or "")[:80]
+    if topic_name:
+        header = f"[Chủ đề: {topic_name}]"
+        lines.append(header)
+        size += len(header) + 1
     # Mới nhất được giữ khi chạm ngân sách chữ: đi ngược từ cuối rồi đảo lại.
     for msg in reversed((ack.get("result") or {}).get("messages") or []):
         line = _thread_history_line(msg)
@@ -1289,30 +1302,30 @@ async def zalo_memory_remember(args: Dict[str, Any], **_kw) -> str:
     if err:
         return err
     try:
-        uri = await asyncio.to_thread(memory_store.remember, scope, str(args.get("text") or ""))
+        memory_id = await asyncio.to_thread(memory_store.remember, scope, str(args.get("text") or ""))
     except (ValueError, memory_store.MemoryUnavailable) as exc:
         return _err(str(exc))
-    return _ok({"da_nho": True, "uri": uri,
+    return _ok({"da_nho": True, "id": memory_id,
                 "huong_dan": "Báo ngắn gọn là đã nhớ cho cuộc trò chuyện này (nhóm/người khác không thấy)."})
 
 
 async def zalo_memory_forget(args: Dict[str, Any], **_kw) -> str:
-    """Chủ nhân dặn "quên chuyện X": lần 1 gọi với `query` để xem mục khớp, lần 2 gọi với `uris` để xoá."""
+    """Chủ nhân dặn "quên chuyện X": lần 1 gọi với `query` để xem mục khớp, lần 2 gọi với `ids` để xoá."""
     from . import memory_store
 
     scope, err = _memory_scope_or_error(_turn())
     if err:
         return err
     try:
-        if args.get("uris"):
-            uris = args.get("uris") if isinstance(args.get("uris"), list) else [args.get("uris")]
-            gone = await asyncio.to_thread(memory_store.forget, scope, uris)
-            return _ok({"da_quen": len(gone), "uris": gone})
-        hits = await asyncio.to_thread(memory_store.find, scope, str(args.get("query") or ""))
+        if args.get("ids"):
+            ids = args.get("ids") if isinstance(args.get("ids"), list) else [args.get("ids")]
+            gone = await asyncio.to_thread(memory_store.forget, scope, ids)
+            return _ok({"da_quen": len(gone), "ids": gone})
+        hits = await asyncio.to_thread(memory_store.search, scope, str(args.get("query") or ""))
     except (ValueError, memory_store.MemoryUnavailable) as exc:
         return _err(str(exc))
     return _ok({"ung_vien": hits, "huong_dan": (
-        "Chọn đúng những mục nói về chuyện chủ nhân muốn quên rồi gọi lại zalo_memory_forget với `uris`. "
+        "Chọn đúng những mục nói về chuyện chủ nhân muốn quên rồi gọi lại zalo_memory_forget với `ids`. "
         "Không có mục nào khớp thì báo là trong trí nhớ của cuộc trò chuyện này không có chuyện đó."
         if hits else "Không thấy mục nào khớp trong trí nhớ của cuộc trò chuyện này.")})
 
@@ -3427,13 +3440,15 @@ TOOLS = [
         "zalo_thread_history",
         "Tra lịch sử tin nhắn THẬT của chính cuộc trò chuyện này (nhóm này, hoặc tin nhắn riêng này) từ kho SQLite. "
         "Dùng khi được hỏi chính xác về chuyện đã qua: 'hôm trước ai nói gì', 'ai đã gửi file X', 'bot trả lời gì hôm thứ Hai'. "
-        "Tìm theo từ khoá `query` (không phân biệt dấu, khớp cả tên tệp), lọc theo tên người gửi `sender`, trong `days` ngày gần đây. "
+        "Tìm theo từ khoá `query` (không phân biệt dấu, khớp cả tên tệp), lọc theo tên người gửi `sender`, "
+        "trong `days` ngày gần đây, hoặc chỉ trong một `topic_id` (chủ đề nhỏ của hội thoại). "
         "Trả từng dòng '[ngày giờ] Tên: nội dung', cũ trước mới sau, tối đa 40 tin. Không đọc được nhóm hay người khác.",
         {
             "query": {"type": "string", "description": "Từ khoá cần tìm, ví dụ 'kế hoạch' hoặc 'bao cao.docx'. Bỏ trống = các tin gần nhất."},
             "sender": {"type": "string", "description": "Một phần tên người gửi, ví dụ 'Lan'."},
             "days": {"type": "integer", "description": "Tìm trong bao nhiêu ngày gần đây (1–30, mặc định 7)."},
             "limit": {"type": "integer", "description": "Số tin tối đa (1–40, mặc định 20)."},
+            "topic_id": {"type": "integer", "description": "Chỉ tìm trong một chủ đề của hội thoại này (nếu biết id từ kết quả trước); -1 = các tin chưa xếp chủ đề."},
         },
         [],
     ), zalo_thread_history, TOOLSET_PUBLIC),
@@ -3473,10 +3488,10 @@ TOOLS = [
     ("zalo_memory_forget", "🧽", _schema(
         "zalo_memory_forget",
         "CHỈ CHỦ NHÂN: khi chủ nhân dặn \"quên chuyện X đi\", xoá khỏi trí nhớ dài hạn của CHÍNH cuộc trò chuyện "
-        "này. Gọi lần 1 với `query` để xem tối đa 5 mục khớp; gọi lần 2 với `uris` (lấy từ kết quả lần 1) để xoá.",
+        "này. Gọi lần 1 với `query` để xem tối đa 5 mục khớp; gọi lần 2 với `ids` (lấy từ kết quả lần 1) để xoá.",
         {
             "query": {"type": "string", "description": "Chuyện cần quên, ví dụ 'mã tủ đồ'."},
-            "uris": {"type": "array", "items": {"type": "string"}, "description": "URI các mục cần xoá (từ lần gọi trước)."},
+            "ids": {"type": "array", "items": {"type": "integer"}, "description": "Mã các mục cần xoá (từ lần gọi trước)."},
         },
         [],
     ), zalo_memory_forget, TOOLSET_OWNER),
