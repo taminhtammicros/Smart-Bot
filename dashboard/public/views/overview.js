@@ -114,6 +114,14 @@ export function attentionItems({ status: s, host, requests, memory, notice, admi
     if (s.lastError && now - Number(s.lastError.atMs || 0) < 24 * 3600_000) {
       out.push({ kind: 'warn', text: `Lỗi lúc ${fmtTime(s.lastError.atMs)}: ${errorText(s.lastError, 'owner').text}`, href: '#/audit' });
     }
+    const b = s.brain;
+    // Kẹt học: còn tồn đọng mà mốc tiến độ không nhích quá 30 phút. Chỉ báo theo tồn đọng thật, không
+    // báo theo con số lẻ — bot xử lý nền nên vài hội thoại chờ là bình thường.
+    if (b && b.stuckThreads > 0) {
+      out.push({ kind: 'warn', text: `Trợ lý đang chậm học: ${b.pendingTopics} hội thoại chờ gói chủ đề, ${b.pendingFacts} chờ trích tri thức, ${b.stuckThreads} không nhích quá 30 phút.`, href: '#/memory' });
+    } else if (b && (b.pendingTopics > 0 || b.pendingFacts > 0) && b.lagMs > 6 * 3600_000) {
+      out.push({ kind: 'info', text: `Trợ lý còn ${b.pendingTopics} hội thoại chờ gói chủ đề và ${b.pendingFacts} chờ trích tri thức — đang xử lý nền.`, href: '#/memory' });
+    }
   }
   if (requests?.length) out.push({ kind: 'info', text: `${requests.length} lời mời kết bạn đang chờ`, requests: true });
   if (host && Math.max(host.cpuPct, host.ramPct, host.diskPct) >= 85) {

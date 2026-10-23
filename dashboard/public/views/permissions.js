@@ -12,6 +12,7 @@ import { FolderChip, FolderColorPicker, FolderFilter, colorOf, inFolderFilter } 
 import { StudioBox, applyPolicy, lockedByPolicy, parseQuota, studioComplete } from './studio-box.js';
 import { QuotaEditor, quotaBadge } from './studio-quota.js';
 import { CallWordsEditor } from './call-words.js';
+import { modelOptions } from './agent.js';
 
 export const DEFAULTS_KEY = 'defaults';
 // Mục "Nhắn riêng" và "Hạn mức xưởng" ở đầu danh sách; mã nhóm Zalo luôn là số nên không trùng.
@@ -24,7 +25,7 @@ export const BULK_KEY = 'bulk';
 export const FOLDER_PREFIX = 'f:';
 const pick = (s) => ({ active: s.active, replyOnlyTagged: s.replyOnlyTagged, paused: s.paused, features: { ...s.features },
   studio: { ...(s.studio || {}) }, studioQuota: s.studioQuota ?? null, imageQuota: s.imageQuota ?? null, videoQuota: s.videoQuota ?? null,
-  soulReminder: s.soulReminder || '' });
+  soulReminder: s.soulReminder || '', modelOverride: s.modelOverride || '' });
 // Hạn mức theo nhóm/thư mục: lượt xưởng, ảnh AI, video AI (null = theo lớp trên).
 const QUOTA_KEYS = ['studioQuota', 'imageQuota', 'videoQuota'];
 const MAX_RULES = 3000; // = MAX_FOLDER_RULES (lib/permissions.js)
@@ -69,14 +70,15 @@ export function mergeGroups(groups, perms) {
 
 export function sameSettings(a, b) {
   return a.active === b.active && a.replyOnlyTagged === b.replyOnlyTagged && Boolean(a.paused) === Boolean(b.paused)
-    && sameBools(a.features, b.features)
+    && sameBools(a.features, b.features) && (a.modelOverride || '') === (b.modelOverride || '')
 }
 
-/** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, từng tính năng, từng nút xưởng, số lượt, lời nhắc riêng. */
+/** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, tính năng, nút xưởng, số lượt, lời nhắc riêng, model riêng. */
 export function changeCount(a, b) {
   let n = (a.active !== b.active) + (a.replyOnlyTagged !== b.replyOnlyTagged) + (Boolean(a.paused) !== Boolean(b.paused))
     + QUOTA_KEYS.filter((k) => (a[k] ?? null) !== (b[k] ?? null)).length;
   if ((a.soulReminder || '') !== (b.soulReminder || '')) n += 1;
+  if ((a.modelOverride || '') !== (b.modelOverride || '')) n += 1;
   for (const k of Object.keys({ ...a.features, ...b.features })) if (a.features[k] !== b.features[k]) n += 1;
   for (const k of Object.keys({ ...a.studio, ...b.studio })) if (a.studio?.[k] !== b.studio?.[k]) n += 1;
   return n;
@@ -93,6 +95,10 @@ export function settingsPayload(d, { isGroup, studioFeatures = [], policy, previ
   // Chỉ gửi chuỗi rỗng khi chủ động xoá câu đang có, vì vắng mặt = giữ nguyên.
   const soul = (d.soulReminder || '').trim();
   if (isGroup && (soul || (previous.soulReminder || '').trim())) body.soulReminder = soul;
+  // Model riêng của nhóm/thư mục: cùng quy tắc — gửi chuỗi rỗng chỉ khi đang có ghim cần bỏ.
+  // "Mặc định" không có ô này: model chung đổi ở trang Khoá API & Model.
+  const model = (d.modelOverride || '').trim();
+  if (isGroup && (model || (previous.modelOverride || '').trim())) body.modelOverride = model;
   return body;
 }
 
@@ -119,9 +125,20 @@ export function staysListed(id, perms, groups) {
     || Boolean(perms.groups[id]) || Boolean(folderOfGroup(perms, id)) || (groups || []).some((g) => g.id === id);
 }
 
+/**
+ * Máy chủ đã BỎ khoá `modelOverride` mình vừa gửi? Bản dashboard cũ (trước 2.54) trả 200 nhưng không biết
+ * khoá này, nên ghim model biến mất trong im lặng — người dùng chỉ thấy thanh lưu mãi báo "còn thay đổi".
+ * Phát hiện được thì báo thẳng thay vì để họ đoán.
+ */
+export function modelDropped(reply, id, draft) {
+  const want = String(draft?.modelOverride || '').trim();
+  if (!want) return false;
+  return !String(reply?.groups?.[id]?.modelOverride || '').trim();
+}
+
 /** Sửa quyền một nhóm/mặc định. `head=false` khi nhúng vào bảng Quyền của Phiên chat (bảng đã có tiêu đề). */
 export function Editor({ target, value, defaults, features, studioFeatures, studioPolicy, defaultQuota, mediaDefaults = null, onSaved, onBack, onDirty, head = true,
-  path: savePath = null, baseLabel = 'Dùng mặc định', note = null }) {
+  path: savePath = null, baseLabel = 'Dùng mặc định', note = null, modelChoices = null, onReloadModels = null }) {
   const isGroup = target.id !== DEFAULTS_KEY;
   // Thư mục cũng dùng Editor này (qua FolderEditor) — lời nhắc của thư mục áp cho mọi nhóm bên trong.
   const isFolder = String(target.id).startsWith(FOLDER_PREFIX);
@@ -133,6 +150,8 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
   const resetMedia = (v) => setMText({ imageQuota: quotaText(v.imageQuota), videoQuota: quotaText(v.videoQuota) });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState({});
+  // Ô lọc cho danh sách model riêng của nhóm/thư mục (cùng cách lọc như trang Khoá API & Model).
+  const [modelQ, setModelQ] = useState('');
   const quota = parseQuota(qText);
   const dirty = !sameSettings(draft, value) || quotaText(draft.studioQuota) !== qText.trim()
     || ['imageQuota', 'videoQuota'].some((k) => quotaText(draft[k]) !== mText[k].trim());
@@ -150,6 +169,12 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
     try {
       const path = savePath || (isGroup ? `/api/permissions/groups/${encodeURIComponent(target.id)}` : '/api/permissions/defaults');
       const r = await api(path, { method: 'PUT', body: settingsPayload(draft, { isGroup, studioFeatures, policy: studioPolicy, previous: value }) });
+      // Máy chủ cũ trả 200 nhưng bỏ khoá nó không biết (vd. modelOverride của bản 2.53): phải nói ra, chứ
+      // im lặng thì thanh lưu cứ báo "còn thay đổi" mà người dùng không hiểu vì sao.
+      if (modelDropped(r, target.id, draft)) {
+        setMsg({ error: 'Máy chủ chưa hiểu mục Model riêng — bản dashboard đang chạy còn cũ. Khởi động lại dashboard rồi lưu lại.' });
+        return;
+      }
       if (onSaved(r, target.id)) setMsg({ ok: 'Đã lưu — bot áp dụng ngay, không cần khởi động lại.' });
     } catch (err) { setMsg({ error: err.message }); } finally { setBusy(false); }
   }
@@ -209,6 +234,25 @@ export function Editor({ target, value, defaults, features, studioFeatures, stud
         onInput=${(e) => set({ soulReminder: e.currentTarget.value })}
         placeholder="Vd. Nhóm này là lớp 12A: xưng em, gọi các bạn là anh chị. Không đưa đáp án bài kiểm tra, chỉ gợi ý."></textarea>
       <p class="muted small">${(draft.soulReminder || '').trim().length}/${MAX_REMINDER} ký tự</p>
+    </details>` : null}
+    ${isGroup ? html`<details class="perm-box" open=${Boolean(draft.modelOverride)}>
+      <summary><span>${isFolder ? 'Model riêng của thư mục' : 'Model riêng của nhóm'}</span><span class="muted perm-box-sum">· ${draft.modelOverride ? `đang ghim ${draft.modelOverride}` : 'theo model chung'}</span></summary>
+      <p class="muted small">${isFolder
+        ? 'Mọi nhóm trong thư mục dùng model này; nhóm ghim riêng thì model của nhóm thắng. '
+        : 'Chỉ nhóm này dùng model này; để trống thì theo thư mục (nếu có), không thì theo model chung của bot. '}
+        Model chung đổi ở trang <a href="#/ai">Khoá API &amp; Model</a> (như lệnh <span class="mono">/model</span> trong Zalo). Lưu là có hiệu lực từ tin kế tiếp.</p>
+      ${modelChoices && modelChoices.models.length ? html`<div class="field"><label for=${`${p}-model-q`} class="sr-only">Lọc model</label>
+        <input id=${`${p}-model-q`} type="search" placeholder="Lọc, vd. gemini" aria-label="Lọc model" value=${modelQ} onInput=${(e) => setModelQ(e.currentTarget.value)} />
+        <label for=${`${p}-model`} class="sr-only">${isFolder ? 'Model riêng của thư mục' : 'Model riêng của nhóm'}</label>
+        <select id=${`${p}-model`} value=${draft.modelOverride || ''} onChange=${(e) => set({ modelOverride: e.currentTarget.value })}>
+          <option value="">Theo ${isFolder ? 'model chung' : 'thư mục / model chung'}${modelChoices.defaultModel ? ` (${modelChoices.defaultModel})` : ''}</option>
+          ${modelOptions({ current: draft.modelOverride, choices: modelChoices.choices, all: modelChoices.models, q: modelQ }).map((m) => html`<option key=${m} value=${m}>${m}${m === modelChoices.defaultModel ? ' (mặc định /model)' : ''}</option>`)}
+        </select>
+        <small class="muted">${modelChoices.listError || 'Danh sách lấy từ cổng AI (gồm cả combo).'}</small></div>`
+      : html`<p class="muted small">${modelChoices?.listError
+          ? `Chưa lấy được danh sách model: ${modelChoices.listError} Cổng AI trả ~2400 model nên lần đầu có thể mất 10–15 giây.`
+          : 'Chưa lấy được danh sách model từ cổng AI.'}
+        ${onReloadModels ? html` <button type="button" class="btn btn-secondary btn-sm" disabled=${busy} onClick=${onReloadModels}>Tải lại danh sách</button>` : null}</p>`}
     </details>` : null}
     <${SaveBar} count=${changeCount(draft, value) || (dirty ? 1 : 0)} busy=${busy} canSave=${dirty && !quota.error && !mError} msg=${msg}
       onUndo=${() => { setDraft(pick(value)); setQText(quotaText(value.studioQuota)); resetMedia(value); setMsg({}); }} />
@@ -310,7 +354,7 @@ export function folderBadge(f) {
   return { kind: 'idle', text: count };
 }
 
-function FolderEditor({ folder, perms, list, admin, onSaved, onBack, onDirty, onDeleted }) {
+function FolderEditor({ folder, perms, list, admin, onSaved, onBack, onDirty, onDeleted, modelChoices = null, onReloadModels = null }) {
   const [name, setName] = useState(folder.name);
   const [picked, setPicked] = useState(() => new Set(folder.groups));
   const [q, setQ] = useState('');
@@ -398,6 +442,7 @@ function FolderEditor({ folder, perms, list, admin, onSaved, onBack, onDirty, on
       value=${pick(folder)} defaults=${pick(perms.defaults)} features=${perms.features} studioFeatures=${perms.studioFeatures || []}
       studioPolicy=${perms.studioPolicy} defaultQuota=${perms.studio?.quota ?? 3} mediaDefaults=${perms.studio} path=${`${base}/settings`}
       note=${`Mọi nhóm trong thư mục thừa hưởng các cài đặt này ngay khi lưu, kể cả nhóm thêm vào sau; người trong thư mục dùng các tính năng này khi nhắn riêng (bật bot, chỉ trả lời khi tag chỉ áp cho nhóm). Nhóm/người chỉnh riêng mục nào thì mục đó của họ thắng. Chủ nhân bot luôn dùng được mọi tính năng.`}
+      modelChoices=${modelChoices} onReloadModels=${onReloadModels}
       onSaved=${(r) => { onSaved(r); return true; }} onDirty=${onDirty} onBack=${onBack} />
   </div>`;
 }
@@ -414,6 +459,9 @@ export function Permissions({ me }) {
   const [flash, setFlash] = useState('');
   // Chế độ "Chọn nhiều" ở danh sách nhóm: Set mã nhóm đã tích, null = tắt.
   const [bulk, setBulk] = useState(null);
+  // Model của cổng AI cho ô "Model riêng" của nhóm/thư mục (cùng nguồn với trang Khoá API & Model).
+  // Chỉ Quản trị đọc được: Chủ bot nhận 403 → để null, giao diện ghi rõ chưa đọc được danh sách.
+  const [modelChoices, setModelChoices] = useState(null);
 
   // Đang có thay đổi chưa lưu: hỏi trước khi đóng/tải lại trang, hoặc đổi trang qua thanh bên / nút Lùi.
   useEffect(() => {
@@ -449,6 +497,20 @@ export function Permissions({ me }) {
     return false;
   }
 
+  /**
+   * Lấy danh sách model cho ô "Model riêng". Cổng AI trả ~2400 model / hơn 1 MB nên lần đầu mất 10–15 giây;
+   * máy chủ đã nhớ kết quả, còn `fresh` (nút "Tải lại danh sách") hỏi thẳng cổng khi cổng vừa thêm model.
+   */
+  async function reloadModels(fresh = false) {
+    try {
+      const r = await api(`/api/admin/ai/models${fresh ? '?fresh=1' : ''}`);
+      setModelChoices({ models: r.models || [], choices: r.choices || [], defaultModel: r.defaultModel || '', listError: r.listError || '' });
+    } catch (err) {
+      // Chủ bot không có quyền đọc trang Khoá API & Model, hoặc máy chủ im: ghi lại lý do để khung sửa nói ra.
+      setModelChoices({ models: [], choices: [], defaultModel: '', listError: err.message });
+    }
+  }
+
   useEffect(() => {
     let alive = true;
     api('/api/permissions').then((r) => { if (alive) setPerms(r); }, (err) => { if (alive) setError(err.message); });
@@ -463,6 +525,9 @@ export function Permissions({ me }) {
       } catch { /* chỉ còn nhóm trong tệp */ }
       if (alive) setGroups(known);
     });
+    // Danh sách model để ghim cho nhóm/thư mục: lỗi (Chủ bot không có quyền, cổng AI chưa trả) thì khung sửa
+    // nói rõ lý do kèm nút "Tải lại danh sách", trang vẫn dùng được bình thường.
+    reloadModels();
     return () => { alive = false; };
   }, []);
 
@@ -570,7 +635,8 @@ export function Permissions({ me }) {
           ? html`<${BulkGroups} key=${BULK_KEY} picked=${picked} list=${list} features=${perms.features} studioFeatures=${perms.studioFeatures || []}
               studioPolicy=${perms.studioPolicy} folders=${perms.folders} onSaved=${(r) => setPerms(r)} onDirty=${setDirty} onBack=${() => setSelected(null)} />`
           : selectedFolder
-          ? html`<${FolderEditor} key=${selected} folder=${selectedFolder} perms=${perms} list=${list} admin=${me?.role === 'admin'}
+          ? html`<${FolderEditor} key=${selected} folder=${selectedFolder} perms=${perms} list=${list} admin=${me?.role === 'admin'} modelChoices=${modelChoices}
+              onReloadModels=${() => reloadModels(true)}
               onSaved=${(r) => setPerms(r)} onDirty=${setDirty} onBack=${() => choose(null)} onDeleted=${() => { setDirty(false); setSelected(null); }} />`
           : selected === DM_KEY
           ? html`<${DmEditor} key=${DM_KEY} dm=${perms.dm} folders=${perms.folders || []} features=${perms.dmFeatures} studioFeatures=${perms.studioFeatures || []}
@@ -583,6 +649,7 @@ export function Permissions({ me }) {
           : target
           ? html`<${Editor} key=${target.id} target=${target} value=${pick(target)}
               defaults=${pick(target.folder ? baseOfGroup(perms, target.id) : perms.defaults)} features=${perms.features} studioFeatures=${perms.studioFeatures || []} studioPolicy=${perms.studioPolicy}
+              modelChoices=${modelChoices} onReloadModels=${() => reloadModels(true)}
               defaultQuota=${perms.studio?.quota ?? 3} mediaDefaults=${perms.studio} onSaved=${onSaved} onDirty=${setDirty} onBack=${() => choose(null)}
               baseLabel=${target.folder ? 'Theo thư mục' : 'Dùng mặc định'}
               note=${target.folder ? `Nhóm thuộc thư mục "${target.folder.name}": mục nào chưa chỉnh riêng thì theo thư mục. Chủ nhân bot luôn dùng được mọi tính năng.` : null} />`

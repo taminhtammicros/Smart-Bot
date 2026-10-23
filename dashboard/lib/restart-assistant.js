@@ -16,8 +16,11 @@ export function makeRestartAssistant({
 }) {
   const opts = { detached: true, windowsHide: true, stdio: 'ignore' };
   return async () => {
-    // Linux mặc định: chờ systemctl xong và xét mã thoát. Các cách chạy tách rời giữ kiểu "spawn là xong".
-    if (!cmd && platform !== 'win32') {
+    // Chỉ Linux mới có systemctl để khởi động lại dịch vụ (chờ tới khi xong và xét mã thoát).
+    // Windows/macOS KHÔNG có systemctl — trước đây điều kiện là `platform !== 'win32'` nên macOS rơi vào nhánh
+    // systemctl, lệnh luôn thất bại và gateway đã dừng thì KHÔNG bao giờ được dựng lại (bấm "Khởi động lại" hay
+    // đổi cài đặt cần khởi động lại → bot chết tới khi có người chạy tay). Cùng cách viết với makeRestartSidecar.
+    if (!cmd && platform === 'linux') {
       await systemctlRestart({ service: 'hermes-gateway', envVar: 'ZALO_ASSISTANT_RESTART_CMD', execImpl });
       return;
     }

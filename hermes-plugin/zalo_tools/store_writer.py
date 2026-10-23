@@ -166,6 +166,85 @@ def accept_facts(scope: str, account_id: str, raw_facts: Iterable[Any], cap: int
         con.close()
 
 
+def read_brain_progress(scope: str, account_id: str) -> Optional[Dict[str, int]]:
+    """Mốc tiến độ của phạm vi: ``{lastMsgMs, lastRunMs}`` hoặc None khi chưa từng chạy.
+
+    `lastMsgMs` = **trần đã đọc** (tin cũ nhất còn phải đọc); `lastRunMs` = mốc tin mới nhất đã thấy lúc
+    chạy lần trước. Worker dùng cả hai để biết vùng tin chưa đọc.
+    """
+    if not SCOPE_RE.match(str(scope or "")):
+        return None
+    con = _connect()
+    if con is None:
+        return None
+    try:
+        row = con.execute(
+            "SELECT last_msg_ms, last_run_ms FROM kb_brain_progress WHERE scope = ? AND account_id = ?",
+            (str(scope), account_id)).fetchone()
+        return {"lastMsgMs": int(row["last_msg_ms"]), "lastRunMs": int(row["last_run_ms"])} if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def mark_brain_progress(scope: str, account_id: str, msg_ms: int, seen_ms: Optional[int] = None) -> bool:
+    """Ghi mốc tiến độ: `msg_ms` = trần đã đọc, `seen_ms` = tin mới nhất đã thấy (mặc định bằng `msg_ms`).
+
+    Mốc chống lặp của worker `brain_jobs`: `_fact_candidates` chỉ chọn phạm vi còn tin cũ hơn trần hoặc
+    mới hơn `seen_ms`. Trần hạ bằng `MIN` để lượt chạy chồng nhau không đẩy trần lên (làm mù tin cũ chưa
+    đọc — đo 23/10: 715 tin của một nhóm bị bỏ qua vì trần nhảy vọt).
+    """
+    if not SCOPE_RE.match(str(scope or "")):
+        return False
+    con = _connect()
+    if con is None:
+        return False
+    seen = int(seen_ms if seen_ms is not None else msg_ms)
+    try:
+        con.execute(
+            "INSERT INTO kb_brain_progress (account_id, scope, last_msg_ms, last_run_ms) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(account_id, scope) DO UPDATE SET "
+            "last_msg_ms = MIN(NULLIF(kb_brain_progress.last_msg_ms, 0), excluded.last_msg_ms), "
+            "last_run_ms = MAX(kb_brain_progress.last_run_ms, excluded.last_run_ms)",
+            (account_id, str(scope), int(msg_ms), seen))
+        con.commit()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+
+
+def close_open_topic(account_id: str, thread_id: str, thread_type: int) -> int:
+    """Đóng chủ đề đang mở của hội thoại; trả topic_id đã đóng (0 nếu không có).
+
+    Cần vì `package_topic` TỪ CHỐI mở chủ đề thứ hai khi còn chủ đề `open`: không đóng thì hội thoại
+    đang hoạt động kẹt vĩnh viễn — đo 23/10: nhóm 3430869407275128341 có 743 tin chờ bên cạnh một
+    chủ đề mở từ 12:10 hôm trước, và không bao giờ được gói lại.
+    """
+    con = _connect()
+    if con is None:
+        return 0
+    try:
+        row = con.execute(
+            "SELECT topic_id FROM topics WHERE account_id = ? AND thread_id = ? AND thread_type = ? "
+            "AND status = 'open' ORDER BY topic_id DESC LIMIT 1",
+            (account_id, str(thread_id), int(thread_type))).fetchone()
+        if not row:
+            return 0
+        topic_id = int(row["topic_id"])
+        con.execute("UPDATE topics SET status = 'closed', updated_at_ms = ? WHERE topic_id = ?",
+                    (_now(), topic_id))
+        con.commit()
+        return topic_id
+    except sqlite3.Error:
+        return 0
+    finally:
+        con.close()
+
+
 def read_profile(scope: str, account_id: str) -> Optional[Dict[str, Any]]:
     """Hồ sơ hiện có của phạm vi: ``{body, updatedAtMs, sourceFactIds}`` hoặc None."""
     con = _connect()

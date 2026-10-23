@@ -288,6 +288,19 @@ export function openZaloStore({ path, retentionDays = 365, now = Date.now } = {}
       PRIMARY KEY(account_id, scope)
     );
 
+    -- Mốc tiến độ trích tri thức (spec §20.3): một dòng / một phạm vi, ghi lúc worker brain_jobs
+    -- chạy xong một lượt cho phạm vi đó. KHÔNG có mốc này thì _fact_candidates chỉ so được
+    -- facts.valid_from_ms với messages.timestamp_ms — lượt nào model không sinh fact mới (tin
+    -- chào hỏi, tin rác) thì phạm vi đó được chọn lại mãi mãi, thành vòng lặp gọi model mỗi 30 giây.
+    -- last_msg_ms = tin mới nhất ĐÃ XEM XÉT; last_run_ms = lúc chạy (dùng cho nhịp thử lại khi lỗi).
+    CREATE TABLE IF NOT EXISTS kb_brain_progress (
+      account_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      last_msg_ms INTEGER NOT NULL DEFAULT 0,
+      last_run_ms INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(account_id, scope)
+    );
+
     -- Trí nhớ mềm (spec §21.4): câu bot tự rút/gói ra không có schema cứng (sở thích, cách nói chuyện, mạch
     -- việc đang dở). Khác bảng facts ở chỗ không đòi kind/subject và không supersede — chỉ có tuổi thọ và độ liên quan.
     CREATE TABLE IF NOT EXISTS soft_memories (
@@ -995,18 +1008,94 @@ export function openZaloStore({ path, retentionDays = 365, now = Date.now } = {}
     } catch { return []; }   // câu FTS hỏng (ký tự lạ) → coi như không thấy
   }
 
+
+  /**
+   * Mốc tiến độ trích tri thức của các phạm vi (spec §20.3). Worker Python đọc bảng này để biết
+   * phạm vi nào còn tin CHƯA XEM XÉT — thiếu nó thì một phạm vi đã xử lý vẫn được chọn lại mỗi vòng.
+   * Chỉ đọc ở đây; worker tự ghi qua `store_writer`.
+   */
+  function brainProgress(accountId) {
+    const rows = db.prepare(
+      'SELECT scope, last_msg_ms, last_run_ms FROM kb_brain_progress WHERE account_id = ?',
+    ).all(String(accountId ?? ''));
+    return new Map(rows.map((row) => [row.scope, {
+      lastMsgMs: Number(row.last_msg_ms) || 0,
+      lastRunMs: Number(row.last_run_ms) || 0,
+    }]));
+  }
   function removeSoftMemory(scope, accountId, id) {
     factLane(scope, accountId);
     return Number(db.prepare('DELETE FROM soft_memories WHERE id = ? AND scope = ? AND account_id = ?')
       .run(Number(id), String(scope), String(accountId)).changes);
   }
 
-  function getHealth() {
+  /**
+   * Số đo sức khoẻ, gồm tồn đọng tầng "Trợ lý biết chuyện" (spec §20).
+   *
+   * `brain` trả lời câu "bot còn phải học bao nhiêu, có đang kẹt không" — đúng chỗ mù đã khiến sự cố
+   * 23/10 (1281 tin nằm chờ, không ai biết) phải đào SQL mới thấy. Công thức khớp
+   * `_topic_candidates`/`_fact_candidates` của `brain_jobs.py`.
+   */
+  function getHealth({ now = Date.now } = {}) {
     const messageCount = Number(db.prepare('SELECT COUNT(*) AS count FROM messages').get().count);
     const auditCount = Number(db.prepare('SELECT COUNT(*) AS count FROM audit_log').get().count);
     let databaseSizeBytes = 0;
     try { databaseSizeBytes = statSync(databasePath).size; } catch { /* database is still ready */ }
-    return { ready: true, databaseSizeBytes, messageCount, auditCount };
+    return { ready: true, databaseSizeBytes, messageCount, auditCount, brain: brainBacklog(now) };
+  }
+
+  /** Tồn đọng tầng não — dùng chung công thức với worker Python để số trên dashboard khớp thực tế. */
+  function brainBacklog(now = Date.now()) {
+    const at = Number(now());
+    const since = at - 7 * 86_400_000;
+    const scope = "(CASE WHEN m.thread_type = 1 THEN 'zalo-g-' ELSE 'zalo-u-' END || m.thread_id)";
+    const after = `
+      FROM messages m
+      LEFT JOIN kb_brain_progress p ON p.account_id = m.account_id AND p.scope = ${scope}
+      WHERE m.text <> '' AND m.msg_type NOT IN ('chat.delete', 'chat.undo') AND m.timestamp_ms >= ?`;
+    const sum = (sql, min) => {
+      const rows = db.prepare(`${sql} GROUP BY m.account_id, m.thread_id, m.thread_type HAVING COUNT(*) >= ?`)
+        .all(since, min);
+      return { threads: rows.length, oldest: rows.length ? Math.min(...rows.map((r) => Number(r.oldest) || at)) : at };
+    };
+    try {
+      // Chủ đề: tin chưa gán, nằm trong vùng chưa đọc so với mốc tiến độ.
+      const topics = sum(
+        `SELECT COALESCE(MIN(m.timestamp_ms), 0) AS oldest ${after}
+           AND m.topic_id IS NULL
+           AND (p.last_msg_ms IS NULL OR m.timestamp_ms < p.last_msg_ms
+                OR m.timestamp_ms > COALESCE(p.last_run_ms, 0))`, 6);
+      // Tri thức: cùng vùng chưa đọc, không phụ thuộc topic_id.
+      const facts = sum(
+        `SELECT COALESCE(MIN(m.timestamp_ms), 0) AS oldest ${after}
+           AND (p.last_msg_ms IS NULL OR m.timestamp_ms < p.last_msg_ms
+                OR m.timestamp_ms > COALESCE(p.last_run_ms, 0))`, 3);
+      const pending = topics.threads + facts.threads;
+      // "Kẹt" = còn tồn đọng THẬT mà mốc không nhích quá 30 phút. Không đếm marker cũ của hội thoại đã
+      // xử lý xong: chúng không còn tin chờ nên worker không đụng tới, `last_run_ms` đứng yên là ĐÚNG —
+      // đếm vào sẽ báo động giả mãi (đo 23/10: 8 marker cũ trong khi chỉ 1 hội thoại còn tồn).
+      const stuck = pending
+        ? Number(db.prepare(`
+            SELECT COUNT(*) AS n FROM kb_brain_progress p
+            WHERE p.last_run_ms < ?
+              AND EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.account_id = p.account_id
+                  AND p.scope = (CASE WHEN m.thread_type = 1 THEN 'zalo-g-' ELSE 'zalo-u-' END || m.thread_id)
+                  AND m.text <> '' AND m.msg_type NOT IN ('chat.delete', 'chat.undo')
+                  AND m.timestamp_ms >= ?
+                  AND (m.timestamp_ms < p.last_msg_ms OR m.timestamp_ms > p.last_run_ms))
+          `).get(at - 30 * 60_000, since)?.n || 0)
+        : 0;
+      return {
+        pendingTopics: topics.threads,
+        pendingFacts: facts.threads,
+        stuckThreads: stuck,
+        lagMs: pending ? Math.max(0, at - Math.min(topics.oldest, facts.oldest)) : 0,
+      };
+    } catch {
+      return { pendingTopics: 0, pendingFacts: 0, stuckThreads: 0, lagMs: 0 };
+    }
   }
 
   return {
@@ -1043,6 +1132,7 @@ export function openZaloStore({ path, retentionDays = 365, now = Date.now } = {}
     resolveContradiction,
     forgetScopeFacts,
     forgetScopeTopics,
+    brainProgress,
     // hồ sơ + trí nhớ mềm (spec §21)
     getProfile,
     setProfile,

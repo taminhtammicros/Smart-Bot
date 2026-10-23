@@ -31,6 +31,40 @@ test('Linux: systemctl lỗi thì báo lỗi gợi ý ZALO_ASSISTANT_RESTART_CMD
   assert.ok(logged.some((l) => /Access denied/.test(l)));
 });
 
+test('macOS: KHÔNG gọi systemctl (máy không có systemd) mà chạy thẳng hermes gateway run', async () => {
+  // Lỗi đã xảy ra: điều kiện cũ `platform !== 'win32'` khiến macOS rơi vào nhánh systemctl, lệnh luôn thất bại
+  // nên gateway đã dừng thì không bao giờ được dựng lại. macOS phải spawn như Windows, không đụng systemctl.
+  const f = fakes();
+  await makeRestartAssistant({ platform: 'darwin', hermesHome: '/h', spawnImpl: f.spawnImpl, execImpl: f.execImpl, existsImpl: f.existsImpl })();
+  assert.equal(f.execs.filter(([file]) => file === 'systemctl').length, 0, 'không được gọi systemctl trên macOS');
+  assert.equal(f.spawned.length, 1);
+  assert.equal(f.spawned[0][0], 'hermes');
+  assert.deepEqual(f.spawned[0][1], ['gateway', 'run', '--accept-hooks']);
+  assert.equal(f.spawned[0][2].detached, true);
+  assert.equal(f.spawned[0][2].cwd, '/h');
+});
+
+test('macOS: gateway cũ chưa nhả khoá (mã 75) thì chạy lại, có giới hạn số lần', async () => {
+  const spawned = [];
+  const execImpl = async (file, args) => { if (file === 'systemctl') throw new Error('không có systemctl trên macOS'); return { stdout: '' }; };
+  const spawnImpl = (exe, argv, opts) => {
+    const rec = { exe, argv, opts, listeners: {}, unref() {}, on(ev, fn) { this.listeners[ev] = fn; } };
+    spawned.push(rec);
+    return rec;
+  };
+  await makeRestartAssistant({ platform: 'darwin', hermesHome: '/h', spawnImpl, execImpl, existsImpl: () => false, retryDelayMs: 5, maxRetries: 2 })();
+  assert.equal(spawned.length, 1, 'lần chạy đầu');
+  spawned[0].listeners.exit?.(75);           // gateway cũ còn giữ khoá
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(spawned.length, 2, 'mã 75 → chạy lại');
+  spawned[1].listeners.exit?.(75);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(spawned.length, 3, 'còn lượt retry');
+  spawned[2].listeners.exit?.(75);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(spawned.length, 3, 'hết maxRetries thì dừng, không lặp vô hạn');
+});
+
 test('có cmd: chạy qua shell, ẩn cửa sổ, tách rời', async () => {
   const f = fakes();
   await makeRestartAssistant({ cmd: 'do-it', platform: 'win32', hermesHome: 'C:/h', spawnImpl: f.spawnImpl, execImpl: f.execImpl, existsImpl: f.existsImpl })();

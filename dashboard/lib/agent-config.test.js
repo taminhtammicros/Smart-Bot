@@ -100,3 +100,41 @@ test('SOUL.md: text không phải chuỗi → 400', (t) => {
   const soul = createSoul({ hermesHome: h, historyDir: join(h, 'soul-history') });
   for (const bad of [undefined, null, 5, ['a'], { a: 1 }]) assert.throws(() => soul.save(bad, 'anh'), (e) => e.statusCode === 400);
 });
+
+test('models: cổng trả chậm vẫn lấy được, và nhớ kết quả cho lần sau', async (t) => {
+  const h = home(t);
+  let calls = 0;
+  // Cổng thật trả ~2400 model / hơn 1 MB mất 11–13 giây; hạn chờ cũ 10 s luôn hết trước khi cổng kịp trả.
+  const fetchImpl = async () => {
+    calls += 1;
+    await new Promise((r) => setTimeout(r, 50));
+    return { ok: true, json: async () => ({ data: [{ id: 'AntiGravity' }, { id: 'NANO-FREE-COMBO' }] }) };
+  };
+  const a = createAgentConfig({ configFile: join(h, 'config.yaml'), fetchImpl });
+  assert.deepEqual(await a.models(), ['AntiGravity', 'NANO-FREE-COMBO']);
+  assert.equal(calls, 1);
+  assert.deepEqual(await a.models(), ['AntiGravity', 'NANO-FREE-COMBO']);
+  assert.equal(calls, 1, 'lần hai lấy từ bản đã nhớ, không gọi cổng nữa');
+  await a.models({ fresh: true });
+  assert.equal(calls, 2, 'fresh: true (nút Tải lại danh sách) hỏi thẳng cổng');
+});
+
+test('models: cổng trả rỗng KHÔNG được nhớ — lần sau phải hỏi lại', async (t) => {
+  const h = home(t);
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return calls === 1
+      ? { ok: true, json: async () => ({ data: [] }) }
+      : { ok: true, json: async () => ({ data: [{ id: 'hermes' }] }) };
+  };
+  const a = createAgentConfig({ configFile: join(h, 'config.yaml'), fetchImpl });
+  assert.deepEqual(await a.models(), []);
+  assert.deepEqual(await a.models(), ['hermes'], 'cổng vừa trả được thì phải thấy ngay, không bị khoá vào bản rỗng');
+});
+
+test('models: cổng im thì báo 502 rõ ràng, không treo vô hạn', async (t) => {
+  const h = home(t);
+  const a = createAgentConfig({ configFile: join(h, 'config.yaml'), fetchImpl: async () => { throw new Error('fetch connect timeout'); } });
+  await assert.rejects(a.models(), (e) => e.statusCode === 502 && /danh sách model/.test(e.message));
+});

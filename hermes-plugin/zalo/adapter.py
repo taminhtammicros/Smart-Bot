@@ -99,6 +99,11 @@ from agent.secret_scope import get_secret as _scoped_get_secret
 # Tên toolset là chuỗi cố định, trùng với zalo_tools/tools.py (test kiểm khớp).
 TOOLSET_OWNER = "zalo_owner"
 TOOLSET_PUBLIC = "zalo_public"
+# Khoá đánh dấu ghim model do ADAPTER đặt (model riêng của nhóm) trong ``_session_model_overrides`` của
+# phiên. Có khoá này thì lần bỏ ghim biết chắc phần ``model`` kia là do mình đặt mà trả về model chung,
+# không xoá nhầm lựa chọn của chủ nhân khi họ gõ ``/model`` trong chính nhóm đó.
+_MODEL_PIN_KEY = "zalo_group_model"
+_MODEL_WAS_KEY = "zalo_was_model"
 
 from .flood import JUST_MUTED as FLOOD_JUST_MUTED
 from .flood import MUTED as FLOOD_MUTED
@@ -107,6 +112,7 @@ from . import model_command as _model_command
 from . import call_words as _call_words
 from . import live_settings as _live_settings
 from . import owner_command as _owner_command
+from .combo_health import load_combo_health as _combo_health
 
 
 def _transcode_to_m4a(audio_path: str) -> Optional[str]:
@@ -1235,6 +1241,10 @@ class ZaloAdapter(BasePlatformAdapter):
             user_name=sender_name,
             message_id=msg_id or None,
         )
+        # Model riêng của nhóm (Phân quyền Bot › nhóm › Model riêng): ghim vào phiên của ĐÚNG hội thoại này
+        # trước khi Hermes dựng tác nhân, nên không đụng model chung của bot và không cần khởi động lại.
+        if is_group:
+            self._pin_group_model(source, thread_id)
 
         try:
             ts = float(frame.get("ts") or 0) / 1000.0
@@ -1601,7 +1611,7 @@ class ZaloAdapter(BasePlatformAdapter):
                 user_name=sender_uid,
                 role_authorized=True,
             )
-            session_key = self._session_key_for_source(source)
+            session_key = self._resolve_session_key(source)
             old_entry = self.session_store._entries.get(session_key)
             self._invalidate_session_run_generation(session_key, reason="session_reset")
             self._release_running_agent_state(session_key)
@@ -1618,6 +1628,86 @@ class ZaloAdapter(BasePlatformAdapter):
         except Exception:
             logger.warning("[zalo] không xoá được phiên đang nạp — để lượt sau tự bắt đầu", exc_info=True)
             return False
+
+    def _resolve_session_key(self, source: Any) -> str:
+        """Mã phiên của hội thoại này — phải TRÙNG mã mà gateway dùng cho lượt hiện tại.
+
+        ``_session_key_for_source`` là hàm của runner, KHÔNG có trên adapter (adapter là con của
+        ``BasePlatformAdapter``); gọi thẳng nó ném ``AttributeError`` và — khi bên gọi nuốt lỗi để bot không chết —
+        model riêng của nhóm lặng lẽ không bao giờ được ghim, mọi nhóm chạy model chung.
+
+        Thứ tự: runner (nếu gateway đã gắn) → ``_source_session_key`` của adapter (cùng ``build_session_key``,
+        có sẵn mọi lúc). Không ra được mã nào thì trả ``""`` để bên gọi tự quyết định.
+        """
+        # 1. Runner: đọc mã đã lưu cho hội thoại trong SessionStore — đây là bản gateway dùng cho lượt này.
+        runner_key = getattr(self, "_session_key_for_source", None)
+        if callable(runner_key):
+            try:
+                key = runner_key(source)
+                if isinstance(key, str) and key:
+                    return key
+            except Exception:
+                logger.debug("[zalo] runner chưa tính được mã phiên", exc_info=True)
+        # 2. Adapter: luôn có, cùng hàm dựng khoá với gateway.
+        try:
+            key = self._source_session_key(source)
+            return key if isinstance(key, str) else ""
+        except Exception:
+            logger.warning("[zalo] không tính được mã phiên cho %s", getattr(source, "chat_id", "?"), exc_info=True)
+            return ""
+
+    # -- Model riêng của nhóm ------------------------------------------------
+
+    def _pin_session_model(self, session_key: str, model: str) -> None:
+        """Ghim (hoặc bỏ ghim) model cho một phiên, giữ nguyên phần ghim của lệnh ``/model``.
+
+        ``session_key`` + ``model`` (``""`` = bỏ ghim). Chỉ ghim khi khác giá trị đang có, nên lượt bình
+        thường không tốn gì; có đổi thì bỏ tác nhân đang giữ trong bộ nhớ đệm để lượt sau dựng lại với
+        model mới.
+
+        Phần ghim của chính adapter nằm ở ``_MODEL_PIN_KEY``, kèm ``_MODEL_WAS_KEY`` ghi lại giá trị
+        ``model`` của lệnh ``/model`` (nếu có) TRƯỚC khi bị đè — nhờ vậy lúc nhóm bỏ ghim, lựa chọn của
+        chủ nhân vẫn còn nguyên chứ không bị xoá lây.
+        """
+        # `_session_model_overrides`/`_evict_cached_agent` nằm trên RUNNER (GatewayRunner), không phải trên
+        # adapter — gateway chỉ gắn tham chiếu qua `adapter.gateway_runner` (run_adapters.py). Lấy thẳng trên
+        # adapter là lỗi đã làm mọi nhóm chạy model chung mà không ai biết, nên ở đây đi qua `gateway_runner`
+        # trước, và báo rõ tên hàm còn thiếu nếu vẫn không có.
+        runner = getattr(self, "gateway_runner", None)
+        states = getattr(self, "_session_model_overrides", None) or getattr(runner, "_session_model_overrides", None)
+        evict = getattr(self, "_evict_cached_agent", None) or getattr(runner, "_evict_cached_agent", None)
+        if states is None or evict is None:
+            missing = [n for n, v in (("_session_model_overrides", states), ("_evict_cached_agent", evict)) if v is None]
+            raise RuntimeError(f"gateway chưa gắn {', '.join(missing)} — không ghim được model cho phiên")
+        want = str(model or "")
+        try:
+            cur = states.get(session_key)
+        except Exception:
+            cur = None
+        if not isinstance(cur, dict):
+            cur = {}
+        if str(cur.get(_MODEL_PIN_KEY) or "") == want:
+            return
+        if want:
+            # Lần đầu ghim: nhớ model mà lệnh /model đang đặt (nếu có) để lúc bỏ ghim trả lại đúng nó.
+            was = cur.get(_MODEL_WAS_KEY, cur.get("model")) if _MODEL_PIN_KEY not in cur else cur.get(_MODEL_WAS_KEY)
+            entry = {**cur, "model": want, _MODEL_PIN_KEY: want}
+            if was:
+                entry[_MODEL_WAS_KEY] = was
+            states[session_key] = entry
+            evict(session_key)
+            return
+        rest = {k: v for k, v in cur.items() if k not in (_MODEL_PIN_KEY, _MODEL_WAS_KEY)}
+        was = cur.get(_MODEL_WAS_KEY)
+        if was:
+            rest["model"] = was           # trả lại lựa chọn của chủ nhân (lệnh /model) đã bị ghim đè lên
+        elif rest.get("model") == cur.get(_MODEL_PIN_KEY):
+            rest.pop("model", None)       # model còn lại đúng là do adapter ghim → trả về model chung
+        if rest:
+            states[session_key] = rest
+        else:
+            states.pop(session_key, None)
+        evict(session_key)
 
     @staticmethod
     def _group_rules(thread_id: str) -> Optional[Dict[str, Any]]:
@@ -1646,6 +1736,71 @@ class ZaloAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[zalo] không đọc được dòng nhắc riêng của nhóm %s: %s", thread_id, exc)
             return ""
+
+    @staticmethod
+    def _group_model(thread_id: str) -> str:
+        """Model riêng của nhóm này (Phân quyền Bot › nhóm › Model riêng), ``""`` khi nhóm dùng model chung.
+
+        Đọc lại mỗi tin nên sửa trên dashboard là có hiệu lực từ tin kế tiếp. Lỗi bất ngờ → model chung:
+        bot vẫn trả lời, chỉ không ghim model riêng.
+        """
+        perms = _group_permissions()
+        if perms is None:
+            return ""
+        try:
+            return str(perms.group_model_override(thread_id) or "")
+        except Exception as exc:
+            logger.warning("[zalo] không đọc được model riêng của nhóm %s: %s", thread_id, exc)
+            return ""
+
+    def _pin_group_model(self, source: Any, thread_id: str) -> None:
+        """Ghim model riêng của nhóm vào PHIÊN của hội thoại này (bỏ ghim khi nhóm về model chung).
+
+        Hermes xếp thứ tự model: phiên (``/model``) → ``channel_overrides`` → ``model.default`` trong
+        ``config.yaml``. Adapter là lớp cha của gateway nên ghi thẳng ``_session_model_overrides`` của
+        đúng mã phiên là cách duy nhất vừa theo nhóm vừa không đụng model chung — đổi cả bot vẫn là việc
+        của lệnh ``/model`` và trang Khoá API & Model.
+
+        Ghi xong phải bỏ tác nhân đang giữ trong bộ nhớ đệm (``_evict_cached_agent``): tác nhân cũ đã đóng
+        băng model trong chữ ký bộ nhớ đệm, không bỏ thì lượt sau vẫn chạy model cũ. Không có gì đổi thì
+        không đụng gì — giữ nguyên ấm bộ nhớ đệm giữa các lượt bình thường.
+
+        Lõi Hermes đổi tên hàm thì ghi WARNING rồi thoát êm: nhóm dùng model chung, bot vẫn trả lời — người vận
+        hành phải thấy được trong log, không được im lặng.
+        """
+        want = self._group_model(thread_id)
+        session_key = self._resolve_session_key(source)
+        if not session_key:
+            logger.warning("[zalo] không tính được mã phiên cho nhóm %s — model riêng %s không được ghim",
+                           thread_id, want or "(không đặt)")
+            return
+        pin = getattr(self, "_pin_session_model", None)
+        if pin is None:
+            logger.warning("[zalo] lõi Hermes không còn hàm ghim model — nhóm %s dùng model chung", thread_id)
+            return
+        # Combo của nhóm đang biết là hỏng (vừa lỗi ở lượt trước): bỏ ghim cho lượt này để bot dùng model chung
+        # và trả lời được ngay, thay vì gửi vào chỗ đã hỏng rồi bắt người hỏi chờ hết các lần thử. Combo tự quay
+        # lại: bộ nhớ này tự hết hạn, và mọi lượt thành công đều xoá ngay.
+        if want and _combo_health().is_down(want):
+            logger.info("[zalo] combo %s của nhóm %s đang lỗi (%s) — lượt này dùng model chung",
+                        want, thread_id, _combo_health().reason(want)[:120])
+            want = ""
+        try:
+            before = None
+            try:
+                _runner = getattr(self, "gateway_runner", None)
+                store = getattr(self, "_session_model_overrides", None) or getattr(_runner, "_session_model_overrides", None)
+                before = (store or {}).get(session_key, {}).get("model")
+            except Exception:
+                before = None
+            pin(session_key, want)
+            # Ghi lại để kiểm được từ log: ghim ĐÃ áp hay chưa (lượt trước lỗi này vì ghim im lặng thất bại).
+            logger.info("[zalo] nhóm %s: %s → model %s",
+                        thread_id, f"đổi model phiên từ {before}" if before else "ghim model phiên",
+                        want or "chung (bỏ ghim riêng)")
+        except Exception:
+            logger.warning("[zalo] không ghim được model %s cho nhóm %s — dùng model chung",
+                           want, thread_id, exc_info=True)
 
     @staticmethod
     def _dm_rules(sender_uid: str) -> Optional[Dict[str, Any]]:

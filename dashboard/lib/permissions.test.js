@@ -412,3 +412,70 @@ test('nhắc riêng: chuẩn hoá một dòng, cắt 1000 ký tự, từ chối 
   // Không gửi khoá = giữ nguyên câu đang có (bản giao diện cũ vẫn lưu được nhóm).
   assert.equal('soulReminder' in parseSettings(settings()), false);
 });
+
+test('model riêng: nhóm ghim model, thư mục làm nền, nhóm thắng; để trống là bỏ ghim', (t) => {
+  const s = setup(t);
+  const { setFolderMembers, createFolder } = s.store;
+  const { id: fid } = createFolder('Lớp');
+  setFolderMembers(fid, [G]);
+  const A = '2054797107487294003';
+
+  // Thư mục ghim model → mọi nhóm trong thư mục dùng, kể cả nhóm chưa có mục riêng trong tệp
+  // (mục riêng chỉ sinh ra khi nhóm khác nền — nền của nhóm trong thư mục chính là thư mục đó).
+  s.store.setFolderSettings(fid, settings({ modelOverride: 'cx/gpt-5.4' }));
+  assert.equal(s.disk().folders[fid].modelOverride, 'cx/gpt-5.4');
+  const folderView = s.store.get().folders.find((f) => f.id === fid);
+  assert.equal(folderView.modelOverride, 'cx/gpt-5.4');
+  assert.equal(s.store.get().groups[G], undefined, 'nhóm không ghim riêng thì không sinh mục trong tệp');
+
+  // Nhóm ghim riêng thì thắng thư mục — `changed` chỉ đúng khoá khác nền thư mục.
+  assert.deepEqual(s.store.setGroup(A, settings({ modelOverride: 'Kira/glm-5.3' }), '12A').changed, ['modelOverride']);
+  assert.equal(s.disk().groups[A].modelOverride, 'Kira/glm-5.3');
+  assert.equal(s.store.get().groups[A].modelOverride, 'Kira/glm-5.3');
+  assert.equal(s.store.get().groups[G], undefined, 'nhóm G không ghim riêng nên vẫn theo thư mục');
+
+  // Để trống = bỏ ghim của nhóm, quay về thư mục; khoá cũ biến khỏi tệp.
+  assert.deepEqual(s.store.setGroup(A, settings(), '12A').changed, ['modelOverride']);
+  assert.equal(s.disk().groups[A]?.modelOverride, undefined);
+  // Nhóm A không còn khoá nào khác nền thư mục nên mục riêng của nó biến mất — model vẫn là model thư mục.
+  assert.equal(s.store.get().groups[A], undefined);
+  assert.equal(s.store.get().folders.find((f) => f.id === fid).modelOverride, 'cx/gpt-5.4');
+
+  // Nhóm ĐANG trong thư mục ghim đúng bằng model thư mục: không ghi khoá nào và `changed` rỗng —
+  // giá trị đang hiệu lực y nguyên, nên dòng Nhật ký không được nói là vừa có thay đổi.
+  assert.deepEqual(s.store.setGroup(G, settings({ modelOverride: 'cx/gpt-5.4' }), 'Tổ').changed, []);
+  assert.equal(s.disk().groups[G], undefined);
+  // Còn nhóm KHÔNG thuộc thư mục nào thì nền là mặc định (không model) — ghim là chỉnh riêng thật.
+  assert.deepEqual(s.store.setGroup(A, settings({ modelOverride: 'cx/gpt-5.4' }), '12A').changed, ['modelOverride']);
+  // Lưu lại y nguyên lần nữa: không còn gì đổi.
+  assert.deepEqual(s.store.setGroup(A, settings({ modelOverride: 'cx/gpt-5.4' }), '12A').changed, []);
+  s.store.setGroup(A, settings(), '12A');
+
+  // Model chung đổi ở Khoá API & Model (config.yaml), không bao giờ đi vào defaults của tệp này.
+  assert.equal('modelOverride' in s.disk().defaults, false);
+  s.store.setDefaults(settings({ modelOverride: 'khong-duoc-ghi' }));
+  assert.equal('modelOverride' in s.disk().defaults, false);
+});
+
+test('model riêng: bỏ ghim ở thư mục trả nhóm về model chung; tên lạ bị từ chối', (t) => {
+  const s = setup(t);
+  const { setFolderMembers, createFolder } = s.store;
+  const { id: fid } = createFolder('Lớp');
+  setFolderMembers(fid, [G]);
+  s.store.setFolderSettings(fid, settings({ modelOverride: 'cx/gpt-5.4' }));
+  s.store.setFolderSettings(fid, settings());
+  assert.equal(s.store.get().groups[G], undefined, 'nhóm G không có mục riêng nào');
+  assert.equal(s.disk().folders[fid].modelOverride, undefined);
+  assert.equal(s.store.get().folders.find((f) => f.id === fid).modelOverride, undefined);
+
+  // Chuỗi rỗng = "theo lớp trên"; khoảng trắng gộp lại (như tên model hay bị dán kèm xuống dòng);
+  // tên có ký tự lạ hoặc quá dài bị từ chối trước khi ghi.
+  assert.equal(parseSettings({ ...settings(), modelOverride: '' }).modelOverride, '');
+  assert.equal(parseSettings({ ...settings(), modelOverride: '  Kira/glm-5.3  ' }).modelOverride, 'Kira/glm-5.3');
+  assert.equal(parseSettings({ ...settings(), modelOverride: 'Kira/\n  glm-5.3' }).modelOverride, 'Kira/glm-5.3');
+  for (const bad of [42, 'x'.repeat(121), 'model;rm -rf /', 'e\u0000m', 'a"b']) {
+    assert.throws(() => parseSettings({ ...settings(), modelOverride: bad }), InvalidPermissions, JSON.stringify(bad));
+  }
+  // Không gửi khoá = giữ nguyên model đang ghim (bản giao diện cũ vẫn lưu được nhóm).
+  assert.equal('modelOverride' in parseSettings(settings()), false);
+});

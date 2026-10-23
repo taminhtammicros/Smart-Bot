@@ -5,9 +5,9 @@ Tầng SQLite nằm cạnh kho lịch sử `zalo.sqlite` của sidecar (bảng `
 (`mode=ro`, như `memory_drift.py` đọc `state.db`), rồi nhờ `ctx.llm` KHÔNG có công cụ (như Xưởng, như
 insight) làm hai việc nền:
 
-1. **Chủ đề** (spec §20.2): hội thoại đủ tin chưa gán và đã im ≥ `TOPIC_QUIET_MINUTES` phút thì gom một
-   trang tin gần nhất, model đặt tên + tóm tắt, mở chủ đề mới và gán tin.
-2. **Tri thức** (spec §20.3–20.4): tin mới gán chủ đề được model trích thành "fact" rời rạc — có kiểu,
+1. **Chủ đề** (spec §20.2): hội thoại đủ tin chưa gán và lô tin đã lắng `TOPIC_LULL_MINUTES` phút thì gom
+   một trang tin gần nhất, model đặt tên + tóm tắt, đóng chủ đề cũ rồi mở chủ đề mới và gán tin.
+2. **Tri thức** (spec §20.3–20.4): tin chưa xem xét được model trích thành "fact" rời rạc — có kiểu,
    gốc tin nhắn (provenance) và hạn hiệu lực. Fact mới cùng (kind, subject) với fact đang hiệu lực:
    model tôi quyết thay thế (supersede) hay mâu thuẫn (xếp hàng đợi để Quản trị/Chủ bot duyệt ở dashboard).
 
@@ -43,6 +43,10 @@ POLL_S = 30.0
 TOPIC_QUIET_MINUTES = 20          # hội thoại im chừng này mới gói chủ đề — nhóm đang nói liên tục bị bỏ
 TOPIC_MIN_MESSAGES = 6            # trang tin dưới chừng này thì chưa đáng mở chủ đề
 TOPIC_PAGE_MESSAGES = 120         # số tin gần nhất đưa cho model khi đặt tên chủ đề
+# Hội thoại chỉ cần LẮNG chừng này để gói chủ đề, không đòi im hẳn như `topicQuietMinutes`: nhóm chat
+# liên tục sẽ không bao giờ đủ im, nên điều kiện cũ khiến nó không bao giờ được học (đo 23/10: 743 tin
+# tồn ở một nhóm). 5 phút đủ để không cắt giữa một lượt đang nói.
+TOPIC_LULL_MINUTES = 5
 MAX_TOPIC_CHARS = 12_000
 FACT_LOOKBACK_MESSAGES = 150      # tin mới gán chủ đề cho mỗi lần trích tri thức
 MAX_FACT_CHARS = 24_000
@@ -299,34 +303,72 @@ def _msg_lines(rows: List[sqlite3.Row]) -> str:
 # ------------------------------------------------------------------ luồng worker
 
 def _topic_candidates(con: sqlite3.Connection, quiet_ms: int, now_ms: int):
-    """Hội thoại có tin chưa gán, đã im đủ lâu — tối đa 4 mỗi vòng, hội thoại lớn nhất trước."""
+    """Hội thoại còn tin chưa gán đủ nhiều — tối đa 4 mỗi vòng, nhiều tin chờ nhất trước.
+
+    Ba luật, rút từ hai lần kẹt thật:
+
+    1. **Có tin mới hơn mốc `kb_brain_progress`.** Lượt hỏng (model trả JSON sai dạng) không gán được
+       chủ đề nên `topic_id` vẫn NULL; không có mốc thì lần sau lại gọi model (đo 23/10: bốn hội thoại
+       không chủ đề bị gọi lại mỗi 30 giây).
+    2. **Không đòi hội thoại phải im `quiet_ms`.** Nhóm đang nói liên tục không bao giờ đủ im, nên luật
+       cũ khiến nó KHÔNG BAO GIỜ được gói — đo 23/10: nhóm 3430869407275128341 tồn 743 tin. Nay chỉ cần
+       lô tin đã lắng `TOPIC_LULL_MINUTES` phút, đủ để không cắt giữa lượt đang nói.
+    3. **Không loại hội thoại đang có chủ đề mở.** `package_topic` từ chối chủ đề thứ hai, nên luật cũ
+       để hội thoại kẹt vĩnh viễn. Nay `_run_topic` tự đóng chủ đề cũ trước khi mở chủ đề mới.
+
+    `quiet_ms` giữ trong chữ ký để `run_once` khỏi đổi, nhưng chỉ dùng làm mốc lắng tối thiểu.
+    """
+    lull_ms = min(int(quiet_ms or 0), TOPIC_LULL_MINUTES * 60_000)
     try:
         return con.execute("""
             SELECT m.account_id, m.thread_id, m.thread_type, COUNT(*) AS ripe, MAX(m.timestamp_ms) AS last
             FROM messages m
+            LEFT JOIN kb_brain_progress p
+              ON p.account_id = m.account_id
+             AND p.scope = (CASE WHEN m.thread_type = 1 THEN 'zalo-g-' ELSE 'zalo-u-' END || m.thread_id)
             WHERE m.text <> '' AND m.msg_type NOT IN ('chat.delete', 'chat.undo')
               AND m.timestamp_ms >= ? AND m.timestamp_ms <= ?
+              AND (p.last_msg_ms IS NULL
+                   OR m.timestamp_ms < p.last_msg_ms
+                   OR m.timestamp_ms > COALESCE(p.last_run_ms, 0))
               AND m.topic_id IS NULL
             GROUP BY m.account_id, m.thread_id, m.thread_type
             HAVING ripe >= ? AND last <= ?
             ORDER BY ripe DESC LIMIT 4
-        """, (now_ms - 7 * 86_400_000, now_ms - quiet_ms, TOPIC_MIN_MESSAGES, now_ms - quiet_ms)).fetchall()
+        """, (now_ms - 7 * 86_400_000, now_ms - lull_ms, TOPIC_MIN_MESSAGES, now_ms - lull_ms)).fetchall()
     except sqlite3.Error:
         return []
 
 
 def _fact_candidates(con: sqlite3.Connection):
-    """Phạm vi có fact song: tin đã gán chủ đề gần nhất mà chưa trích (mốc lưu trong kb_brain_progress)."""
+    """Phạm vi còn tin CHƯA ĐỌC để trích tri thức — mốc ở `kb_brain_progress` (spec §20.3).
+
+    `last_msg_ms` là **trần đã đọc**: phạm vi được chọn khi còn tin cũ hơn nó (tồn đọng chưa đọc) hoặc
+    tin mới hơn `last_run_ms` (vừa đến). Mỗi lượt `_run_facts` đọc 150 tin *mới nhất trong phần chưa
+    đọc* rồi hạ trần xuống tin cũ nhất vừa đọc, nên tồn đọng cạn dần 150 tin mỗi vòng.
+
+    Điều kiện cũ (``NOT EXISTS ... f.valid_from_ms >= m.timestamp_ms``) so fact với chính thời điểm tin
+    nhắn, nên hội thoại mà model KHÔNG sinh fact mới (tin chào hỏi, tin rác) vẫn khớp mãi: vòng nào cũng
+    gọi model. Đo thật 22/10: 11–14 lượt `deepseek-v4-pro` mỗi phút dù không ai nhắn.
+
+    KHÔNG đòi `topic_id IS NOT NULL`: tri thức độc lập với gói chủ đề, và pha gói chủ đề có thể trễ hoặc
+    hỏng. Buộc vào nó thì tin mới chỉ được trích sau khi chủ đề được gói — đo 23/10: 1281 tin nằm chờ.
+    """
     try:
         return con.execute("""
-            SELECT m.account_id, m.thread_id, m.thread_type, MAX(m.timestamp_ms) AS last, COUNT(*) AS n
+            SELECT m.account_id, m.thread_id, m.thread_type,
+                   MAX(m.timestamp_ms) AS newest, MIN(m.timestamp_ms) AS oldest, COUNT(*) AS n
             FROM messages m
-            WHERE m.topic_id IS NOT NULL AND m.timestamp_ms >= ? AND
-              NOT EXISTS (SELECT 1 FROM facts f WHERE f.account_id = m.account_id
-                          AND f.scope = (CASE WHEN m.thread_type = 1 THEN 'zalo-g-' ELSE 'zalo-u-' END || m.thread_id)
-                          AND f.valid_from_ms >= m.timestamp_ms)
+            LEFT JOIN kb_brain_progress p
+              ON p.account_id = m.account_id
+             AND p.scope = (CASE WHEN m.thread_type = 1 THEN 'zalo-g-' ELSE 'zalo-u-' END || m.thread_id)
+            WHERE m.text <> '' AND m.msg_type NOT IN ('chat.delete', 'chat.undo')
+              AND m.timestamp_ms >= ?
+              AND (p.last_msg_ms IS NULL
+                   OR m.timestamp_ms < p.last_msg_ms
+                   OR m.timestamp_ms > COALESCE(p.last_run_ms, 0))
             GROUP BY m.account_id, m.thread_id, m.thread_type HAVING n >= 3
-            ORDER BY last DESC LIMIT 4
+            ORDER BY newest DESC LIMIT 4
         """, (int(time.time() * 1000) - 7 * 86_400_000,)).fetchall()
     except sqlite3.Error:
         return []
@@ -389,11 +431,26 @@ def _clip_multiline(value: Any, limit: int) -> str:
 
 
 def _run_topic(con: sqlite3.Connection, llm: Any, row: sqlite3.Row, at_ms: int) -> bool:
-    """Gói một chủ đề cho hội thoại: model đặt tên, store mở topic + gán tin. Trả True nếu đã gói."""
+    """Gói một chủ đề cho hội thoại: model đặt tên, store mở topic + gán tin. Trả True nếu đã gói.
+
+    Ghi mốc tiến độ bất kể thành bại. Trước đây lượt hỏng (model trả JSON sai dạng, store từ chối) để
+    nguyên `topic_id IS NULL`, nên vòng sau lại chọn đúng hội thoại đó — đo 23/10 01:05: bốn hội thoại
+    không có chủ đề nào bị gọi lại mỗi 30 giây. Mốc chỉ nhích khi đã thật sự XEM XÉT.
+
+    Đóng chủ đề cũ trước khi gói: `package_topic` từ chối mở chủ đề thứ hai, nên hội thoại đang hoạt
+    động sẽ kẹt vĩnh viễn nếu chủ đề đầu không bao giờ đóng.
+    """
     account_id, thread_id, thread_type = str(row["account_id"]), str(row["thread_id"]), int(row["thread_type"])
     page = _page(con, account_id, thread_id, thread_type, TOPIC_PAGE_MESSAGES, topic_id=None)
     if len(page) < TOPIC_MIN_MESSAGES:
         return False
+    from . import store_writer
+    scope = f"zalo-g-{thread_id}" if thread_type == 1 else f"zalo-u-{thread_id}"
+    # Mốc: trần đọc hạ xuống tin CŨ NHẤT của trang (tin cũ hơn chưa gói vẫn còn cho lượt sau), mốc
+    # đã-thấy nhích tới tin MỚI NHẤT. Lấy `max` cho cả hai như trước sẽ nhảy qua mọi tin cũ hơn —
+    # đo 23/10: 715 tin một nhóm bị bỏ qua vĩnh viễn.
+    oldest_ms = min(int(r["timestamp_ms"]) for r in page)
+    seen_ms = max(int(r["timestamp_ms"]) for r in page)
     transcript = "\n".join(f"{r['rowid']}\t{'Bot' if r['is_self'] else (r['sender_name'] or 'Ai đó').strip()[:60]}\t"
                            + " ".join(str(r["text"]).split())[:400].translate(_ANGLE)
                            for r in page).translate(_ANGLE)[:MAX_TOPIC_CHARS]
@@ -402,11 +459,10 @@ def _run_topic(con: sqlite3.Connection, llm: Any, row: sqlite3.Row, at_ms: int) 
     data = _bun_local_call(llm, [{"role": "system", "content": TOPIC_PROMPT},
                                  {"role": "user", "content": f"<tin>\n{transcript}\n</tin>"}],
                            timeout=TOPIC_CALL_TIMEOUT, purpose="zalo-brain-topic")
-    if not data or not isinstance(data.get("title"), str) or not data["title"].strip():
-        logger.debug("[zalo] brain_jobs: model trả chủ đề sai dạng — bỏ lượt")
-        return False
-    title = _clip(data["title"], 200).strip()
+    title = _clip(data.get("title"), 200).strip() if isinstance(data, dict) else ""
     if not title:
+        logger.debug("[zalo] brain_jobs: model trả chủ đề sai dạng — bỏ lượt")
+        store_writer.mark_brain_progress(scope, account_id, msg_ms=oldest_ms, seen_ms=seen_ms)
         return False
     summary = _clip(data.get("summary"), 400).strip()
     ids = {int(i) for i in (data.get("message_ids") or []) if str(i).lstrip("-").isdigit()} if isinstance(data.get("message_ids"), list) else set()
@@ -416,24 +472,45 @@ def _run_topic(con: sqlite3.Connection, llm: Any, row: sqlite3.Row, at_ms: int) 
     ids &= page_ids
     if not ids:
         ids = page_ids
-    from . import store_writer
-    return store_writer.package_topic(account_id, thread_id, thread_type, title, summary, ids)
+    # Hội thoại có thể còn chủ đề mở từ lần gói trước; đóng trước, nếu không `package_topic` trả False.
+    store_writer.close_open_topic(account_id, thread_id, thread_type)
+    packaged = store_writer.package_topic(account_id, thread_id, thread_type, title, summary, ids)
+    store_writer.mark_brain_progress(scope, account_id, msg_ms=oldest_ms, seen_ms=seen_ms)
+    return packaged
 
 
 def _run_facts(con: sqlite3.Connection, llm: Any, row: sqlite3.Row, cap: int) -> int:
-    """Trích tri thức cho một hội thoại đã có chủ đề; trả số fact mới ghi. Không xoá/reorder gì."""
+    """Trích tri thức cho một hội thoại; trả số fact mới ghi. Không xoá/reorder gì.
+
+    Dù model trả fact hay không, lượt này ĐÁNH DẤU đã xem tới tin mới nhất của phạm vi
+    (`store_writer.mark_brain_progress`). Không đánh dấu thì lần sau phạm vi đó lại được chọn và
+    worker gọi model vô hạn mỗi `POLL_S` giây — đúng vòng lặp đo được ngày 22/10.
+
+    Trang tin KHÔNG lọc `topic_id`: trích tri thức độc lập với gói chủ đề, và chờ được gói thì tin nằm
+    chờ vô hạn khi chủ đề đang mở (đo 23/10: 1281 tin tồn).
+    """
     account_id, thread_id, thread_type = str(row["account_id"]), str(row["thread_id"]), int(row["thread_type"])
-    # tin ĐÃ gán chủ đề gần nhất — mỗi làn trích đọc lùi về gần và model tự trích tri thức
+    from . import store_writer
+    scope = f"zalo-g-{thread_id}" if thread_type == 1 else f"zalo-u-{thread_id}"
+    progress = store_writer.read_brain_progress(scope, account_id) or {}
+    ceiling = int(progress.get("lastMsgMs") or 0)      # trần đã đọc
+    floor_seen = int(progress.get("lastRunMs") or 0)   # mốc tin mới nhất đã thấy
+    # Vùng CHƯA ĐỌC: tin cũ hơn trần (tồn đọng) hoặc mới hơn mốc lần trước. Đọc 150 tin MỚI NHẤT trong
+    # vùng đó; lượt sau hạ trần xuống tin cũ nhất vừa đọc nên tồn đọng cạn dần.
     page = con.execute(
         """SELECT rowid, is_self, sender_name, text, timestamp_ms, topic_id FROM messages
            WHERE account_id = ? AND thread_id = ? AND thread_type = ? AND text <> ''
-             AND msg_type NOT IN ('chat.delete','chat.undo') AND topic_id IS NOT NULL
+             AND msg_type NOT IN ('chat.delete','chat.undo')
+             AND (? = 0 OR timestamp_ms < ? OR timestamp_ms > ?)
            ORDER BY timestamp_ms DESC, rowid DESC LIMIT ?""",
-        (account_id, thread_id, thread_type, FACT_LOOKBACK_MESSAGES)).fetchall()
+        (account_id, thread_id, thread_type, ceiling, ceiling, floor_seen,
+         FACT_LOOKBACK_MESSAGES)).fetchall()
     if not page:
         return 0
-    from . import store_writer
-    scope = f"zalo-g-{thread_id}" if thread_type == 1 else f"zalo-u-{thread_id}"
+    # Trần MỚI = tin cũ nhất vừa đọc: hạ xuống để lượt sau đọc tiếp phần cũ hơn. Mốc đã-thấy nhích tới
+    # tin mới nhất vừa đọc, để vòng sau biết có tin mới hơn chưa xử lý.
+    oldest_read = min(int(r["timestamp_ms"]) for r in page)
+    newest_read = max(int(r["timestamp_ms"]) for r in page)
     existing = store_writer.active_facts(scope, account_id)
     transcript = "\n".join(f"{r['rowid']}\t{'Bot' if r['is_self'] else (r['sender_name'] or 'Ai đó').strip()[:60]}\t"
                            + " ".join(str(r["text"]).split())[:400].translate(_ANGLE) for r in reversed(page))
@@ -443,9 +520,17 @@ def _run_facts(con: sqlite3.Connection, llm: Any, row: sqlite3.Row, cap: int) ->
                                  {"role": "user", "content": f"<tin>\n{transcript}\n</tin>\n\n"
                                   f"<tri_thuc_cu>\n{oldblock}\n</tri_thuc_cu>"}],
                            timeout=FACT_CALL_TIMEOUT, purpose="zalo-brain-facts")
-    if not data or not isinstance(data.get("facts"), list):
-        return 0
-    return store_writer.accept_facts(scope, account_id, data["facts"], cap, FACT_KINDS)
+    written = 0
+    if data and isinstance(data.get("facts"), list):
+        written = store_writer.accept_facts(scope, account_id, data["facts"], cap, FACT_KINDS)
+    # Ghi mốc kể cả khi model trả rỗng/lỗi dạng: đã ĐỌC thì đừng đọc lại. Lỗi mạng ném ra ngoài (run_once
+    # bắt và ghi log) nên mốc không nhích khi lượt chưa thật sự chạy.
+    store_writer.mark_brain_progress(
+        scope, account_id,
+        msg_ms=min(ceiling, oldest_read) if ceiling else oldest_read,
+        seen_ms=newest_read,
+    )
+    return written
 
 
 def _profile_candidates(con: sqlite3.Connection, now_ms: int) -> List[Dict[str, Any]]:

@@ -21,6 +21,7 @@ cần khởi động lại, không đụng lõi Hermes. Chỉ sửa dòng đó (
 from __future__ import annotations
 
 import difflib
+import importlib
 import json
 import os
 import re
@@ -225,4 +226,36 @@ def handle(
         set_default_model(config_path, target)
     except Exception as exc:
         return f"Chưa đổi được model: {exc}"
-    return f"Đã đổi cả bot sang {target} (trước đó: {current or 'chưa đặt'}).\nTin nhắn tiếp theo ở mọi nhóm sẽ dùng model mới."
+    return (f"Đã đổi cả bot sang {target} (trước đó: {current or 'chưa đặt'}).\n"
+            f"Tin nhắn tiếp theo ở mọi nhóm sẽ dùng model mới.{_pinned_note(target)}")
+
+
+def _pinned_note(new_model: str) -> str:
+    """Câu nhắc khi có nhóm đang ghim model riêng (Phân quyền Bot › nhóm › Model riêng).
+
+    Nhóm ghim thì THẮNG model chung, nên đổi ``/model`` không đụng tới chúng — nói ra để chủ nhân không
+    tưởng nhóm đó vừa đổi theo. Đọc lỗi thì trả ``""``: lệnh vẫn chạy bình thường.
+    """
+    # Cùng cách adapter tìm mô-đun: cài vào <HERMES_HOME>/plugins thì hai plugin được nạp dưới tên tổng hợp
+    # (hermes_plugins.zalo_tools), còn trong mã repo là plugins.zalo_tools — thử cả hai, hỏng thì thôi.
+    _perms = None
+    for name in ("plugins.zalo_tools.group_permissions", "hermes_plugins.zalo_tools.group_permissions",
+                 "zalo_tools.group_permissions"):
+        try:
+            _perms = importlib.import_module(name)
+            break
+        except Exception:
+            continue
+    if _perms is None:
+        return ""
+    try:
+        pinned = _perms.group_model_overrides()
+    except Exception:
+        return ""
+    others = sorted((gid, model) for gid, model in pinned.items() if model != new_model)
+    if not others:
+        return ""
+    shown = ", ".join(f"{gid} ({model})" for gid, model in others[:5])
+    more = f" và {len(others) - 5} nhóm khác" if len(others) > 5 else ""
+    return (f"\nLưu ý: {len(others)} nhóm đang ghim model riêng nên KHÔNG đổi theo — {shown}{more}. "
+            "Bỏ ghim ở Phân quyền Bot › nhóm › Model riêng.")

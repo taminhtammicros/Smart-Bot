@@ -27,6 +27,47 @@ test('health snapshot combines Zalo, bridge, database, traffic, and backfill sta
   assert.equal(snapshot.traffic.lastOutboundAtMs, 1_000_250);
 });
 
+test('brain backlog passes through to the snapshot at top level', () => {
+  const store = {
+    getHealth: () => ({
+      ready: true, databaseSizeBytes: 4096, messageCount: 12, auditCount: 8,
+      brain: { pendingTopics: 3, pendingFacts: 5, stuckThreads: 0, lagMs: 90_000 },
+    }),
+  };
+  const health = createRuntimeHealth({ store, now: () => 1_000_000 });
+  health.setZaloState('logged-in');
+  health.bridgeConnected('c1');
+  health.bridgeHeartbeat('c1');
+  const snapshot = health.snapshot();
+  assert.deepEqual(snapshot.brain, { pendingTopics: 3, pendingFacts: 5, stuckThreads: 0, lagMs: 90_000 });
+  assert.equal(snapshot.status, 'healthy', 'còn tồn đọng nhưng vẫn đang nhích thì chưa phải degraded');
+});
+
+test('stuck learning degrades health even when every other signal is fine', () => {
+  const store = {
+    getHealth: () => ({
+      ready: true, databaseSizeBytes: 4096, messageCount: 12, auditCount: 8,
+      brain: { pendingTopics: 4, pendingFacts: 9, stuckThreads: 2, lagMs: 7_200_000 },
+    }),
+  };
+  const health = createRuntimeHealth({ store, now: () => 2_000_000 });
+  health.setZaloState('logged-in', { userId: 'bot-1' });
+  health.bridgeConnected('c1');
+  health.bridgeHeartbeat('c1');
+  const snapshot = health.snapshot();
+  assert.equal(snapshot.status, 'degraded', 'tồn đọng mà mốc không nhích thì phải báo degraded');
+  assert.equal(snapshot.brain.stuckThreads, 2);
+});
+
+test('missing brain counters default to zero, never undefined', () => {
+  const store = { getHealth: () => ({ ready: true, messageCount: 0, auditCount: 0, databaseSizeBytes: 0 }) };
+  const health = createRuntimeHealth({ store, now: () => 1 });
+  health.setZaloState('logged-in');
+  health.bridgeConnected('c1');
+  health.bridgeHeartbeat('c1');
+  assert.deepEqual(health.snapshot().brain, { pendingTopics: 0, pendingFacts: 0, stuckThreads: 0, lagMs: 0 });
+});
+
 test('stale bridge clients degrade health and are returned for cleanup', () => {
   let current = 2_000_000;
   const health = createRuntimeHealth({

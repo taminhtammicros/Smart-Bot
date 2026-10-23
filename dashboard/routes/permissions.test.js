@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createAgentConfig } from '../lib/agent-config.js';
 import { FEATURE_KEYS, STUDIO_FEATURES } from '../lib/permissions.js';
 import { fakeSidecar, loginAs, makeDeps, startApp } from '../test-helpers.js';
 
@@ -251,4 +252,51 @@ test('thêm người vào thư mục qua API (Liên hệ): giữ người cũ, g
   assert.deepEqual(disk().folders[fid].people, [{ uid: P, name: 'Lan' }, { uid: Q, name: 'Minh' }]);
   assert.equal((await call(`/api/permissions/folders/${fid}/people/add`, { method: 'POST', cookie: owner, body: { people: 'x' } })).status, 400);
   assert.equal((await call('/api/permissions/folders/khong-co/people/add', { method: 'POST', cookie: owner, body: { people: [{ uid: P }] } })).status, 400);
+});
+
+test('model riêng qua API: phải có trên cổng AI mới lưu; ghim nhóm/thư mục; dòng Nhật ký nêu tên model', async (t) => {
+  // Cổng AI giả: chỉ có đúng hai model — giống `agentConfig.models()` thật đọc `<base_url>/models`.
+  const deps = makeDeps(t);
+  const configFile = join(deps.dir, 'config.yaml');
+  writeFileSync(configFile, 'model:\n  default: hermes\n  base_url: http://127.0.0.1:20128/v1\n  api_key: sk-test\n');
+  deps.agentConfig = createAgentConfig({
+    configFile,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: 'hermes' }, { id: 'Kira/glm-5.3' }] }) }),
+  });
+  const { call } = await startApp(t, deps);
+  const admin = await loginAs(t, deps, call);
+  const disk = () => JSON.parse(readFileSync(join(deps.dir, 'zalo', 'permissions.json'), 'utf8'));
+
+  // Tên không có trên cổng AI → 400 kèm cách sửa, tệp không đổi.
+  const bogus = await call(`/api/permissions/groups/${G}`, { method: 'PUT', cookie: admin, body: body({ modelOverride: 'khong-co-model-nay' }) });
+  assert.equal(bogus.status, 400);
+  assert.match(bogus.json.error, /Cổng AI không có model khong-co-model-nay/);
+  assert.equal((await call('/api/permissions', { cookie: admin })).json.groups?.[G], undefined);
+
+  // Tên có thật → lưu vào mục nhóm + Nhật ký nói rõ model riêng.
+  const ok = await call(`/api/permissions/groups/${G}`, { method: 'PUT', cookie: admin, body: body({ modelOverride: 'Kira/glm-5.3' }) });
+  assert.equal(ok.status, 200);
+  assert.equal(disk().groups[G].modelOverride, 'Kira/glm-5.3');
+  const log = deps.activity.list().filter((e) => e.action === 'permissions_group').pop();
+  assert.match(log.detail, /model riêng: Kira\/glm-5\.3/);
+
+  // Thư mục cũng nhận model riêng; nhóm trong thư mục thừa hưởng khi không ghim riêng.
+  const fid = (await call('/api/permissions/folders', { method: 'POST', cookie: admin, body: { name: 'Lớp' } })).json.created;
+  const G2 = '2054797107487294812';
+  await call(`/api/permissions/folders/${fid}/members`, { method: 'PUT', cookie: admin, body: { groups: [G, G2] } });
+  assert.equal((await call(`/api/permissions/folders/${fid}/settings`, { method: 'PUT', cookie: admin, body: body({ modelOverride: 'hermes' }) })).status, 200);
+  assert.equal(disk().folders[fid].modelOverride, 'hermes');
+  // Nhóm G ghim riêng "Kira/glm-5.3" nên thắng model thư mục; nhóm G2 đi theo thư mục nên không có mục riêng.
+  assert.equal(disk().groups[G].modelOverride, 'Kira/glm-5.3');
+  assert.equal(disk().groups[G2], undefined);
+  assert.equal((await call('/api/permissions', { cookie: admin })).json.folders.find((f) => f.id === fid).modelOverride, 'hermes');
+
+  // Bỏ ghim: gửi chuỗi rỗng, khoá biến khỏi mục nhóm.
+  assert.equal((await call(`/api/permissions/groups/${G}`, { method: 'PUT', cookie: admin, body: body({ modelOverride: '' }) })).status, 200);
+  assert.equal(disk().groups[G], undefined);
+
+  // Chủ bot cũng sửa được (như mọi mục khác của Phân quyền Bot), chưa đăng nhập thì 401.
+  const owner = await loginAs(t, deps, call, { username: 'chu', role: 'owner' });
+  assert.equal((await call(`/api/permissions/groups/${G2}`, { method: 'PUT', cookie: owner, body: body({ modelOverride: 'hermes' }) })).status, 200);
+  assert.equal((await call(`/api/permissions/groups/${G2}`, { method: 'PUT', body: body({ modelOverride: 'hermes' }) })).status, 401);
 });

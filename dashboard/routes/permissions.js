@@ -25,7 +25,7 @@ export function describeSettings(s) {
   return [s.active ? 'Hoạt động' : 'Tạm tắt', s.replyOnlyTagged ? 'chỉ trả lời khi được tag' : 'trả lời mọi tin',
     s.paused ? 'đang tạm dừng' : '',
     off.length ? `tắt: ${off.join(', ')}` : 'bật mọi tính năng', ...describeStudio(s.studio, s.studioQuota),
-    s.soulReminder ? 'dòng nhắc riêng' : ''].filter(Boolean).join(' · ');
+    s.soulReminder ? 'dòng nhắc riêng' : '', s.modelOverride ? `model riêng: ${s.modelOverride}` : ''].filter(Boolean).join(' · ');
 }
 
 /** Dòng Nhật ký cho thay đổi hàng loạt: "Tạm tắt · bật: Tra cứu web · tắt: Video" — chỉ các mục đã đổi. */
@@ -55,7 +55,7 @@ export function describeQuotas(s) {
   return [`Mặc định ${s.quota} lượt/người/ngày`, s.people.length ? `${s.people.length} người có hạn mức riêng` : 'không ai có hạn mức riêng'].join(' · ');
 }
 
-export function permissionRoutes({ permissions, sidecar, threadNames, activity, settings, owners = null, platform = process.platform, studioPolicyFile = '' }) {
+export function permissionRoutes({ permissions, sidecar, threadNames, activity, settings, owners = null, platform = process.platform, studioPolicyFile = '', agentConfig = null }) {
   // Danh sách cũ "Nhóm chỉ chủ nhân gọi được" (Cấu hình / config.yaml): nhóm chưa phân quyền riêng mà nằm trong đó thì
   // thành viên vẫn bị bỏ qua — trang Phân quyền phải nói ra, không để tưởng nhóm đang mở.
   const legacyOwnerOnly = () => {
@@ -70,6 +70,20 @@ export function permissionRoutes({ permissions, sidecar, threadNames, activity, 
     console.error('[dashboard]', err);
     return res.status(500).json({ ok: false, error: fallback });
   };
+
+  /**
+   * Model riêng gửi lên có thật trên cổng AI không (như lệnh /model của plugin: chỉ nhận tên có trong
+   * `<model.base_url>/models`). Chuỗi rỗng = theo lớp trên, miễn kiểm. Cổng AI chưa trả danh sách thì từ chối
+   * kèm cách sửa — thà bắt chọn lại còn hơn ghim một tên sai để nhóm im lặng vì mọi lượt gọi đều lỗi.
+   */
+  async function modelProblem(model) {
+    const name = String(model || '').trim();
+    if (!name || !agentConfig) return '';
+    let list;
+    try { list = await agentConfig.models(); } catch (err) { return `Chưa kiểm được model với cổng AI: ${err.message}`; }
+    if (list.includes(name)) return '';
+    return `Cổng AI không có model ${name} — mở Khoá API & Model để xem danh sách rồi chọn lại.`;
+  }
 
   r.get('/permissions', requireAuth, (req, res) => {
     try { res.json({ ok: true, features: FEATURES, dmFeatures: DM_FEATURES, studioFeatures: STUDIO_FEATURES, studioPolicy: policy(), legacyOwnerOnly: legacyOwnerOnly(), ownerUids: ownerUids(), ...permissions.get() }); } catch (err) { fail(res, err, READ_FAIL); }
@@ -192,9 +206,11 @@ export function permissionRoutes({ permissions, sidecar, threadNames, activity, 
       res.json(full(state));
     } catch (err) { fail(res, err, SAVE_FAIL); }
   });
-  r.put('/permissions/folders/:fid/settings', requireAuth, (req, res) => {
+  r.put('/permissions/folders/:fid/settings', requireAuth, async (req, res) => {
     let s;
     try { s = parseSettings(req.body); } catch (err) { return fail(res, err, SAVE_FAIL); }
+    const problem = await modelProblem(s.modelOverride);
+    if (problem) return res.status(400).json({ ok: false, error: problem });
     try {
       const { state, changed } = permissions.setFolderSettings(req.params.fid, s);
       logFolder(req, `thư mục "${folderLabel(state, req.params.fid)}": ${changed.length ? describeSettings(s) : 'theo mặc định'}`);
@@ -229,6 +245,8 @@ export function permissionRoutes({ permissions, sidecar, threadNames, activity, 
     if (!GROUP_ID.test(groupId)) return res.status(400).json({ ok: false, error: 'Nhóm không hợp lệ — chọn lại từ danh sách.' });
     let s;
     try { s = parseSettings(req.body); } catch (err) { return fail(res, err, SAVE_FAIL); }
+    const problem = await modelProblem(s.modelOverride);
+    if (problem) return res.status(400).json({ ok: false, error: problem });
     try {
       const name = (await threadNames.load()).get(groupId) || '';
       // Nhóm thuộc danh sách cũ "chỉ chủ nhân": luôn giữ mục riêng (kể cả khi bằng mặc định) để phân quyền này thắng danh sách đó.

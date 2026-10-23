@@ -132,6 +132,11 @@ def _quota(value: Any) -> Optional[int]:
 SOUL_REMINDER_MAX = 1000
 _SOUL_KEEP = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
+# Model riêng của nhóm/thư mục (``modelOverride``): cùng bộ ký tự với MODEL_NAME của dashboard
+# (lib/permissions.js) và model_command (``_PLAIN_YAML``) để tên chép qua lại không phải bọc nháy.
+MODEL_MAX = 120
+_MODEL = re.compile(r"^[A-Za-z0-9._/@:+-]{1,%d}$" % MODEL_MAX)
+
 
 def _soul(value: Any) -> str:
     """Dòng nhắc riêng của nhóm (``soulReminder``): chuỗi một dòng, bỏ ký tự điều khiển, tối đa 1000 ký tự.
@@ -141,6 +146,18 @@ def _soul(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(_SOUL_KEEP.sub("", value).split())[:SOUL_REMINDER_MAX]
+
+
+def _model(value: Any) -> str:
+    """Model riêng của nhóm/thư mục (``modelOverride``): tên hợp lệ, ``""`` khi không đặt hoặc sai dạng.
+
+    Lớp gộp: ``groups[id].modelOverride`` ← ``folders[fid].modelOverride``. Không đặt = bot dùng model chung
+    (``model.default`` của ``config.yaml``, đổi bằng lệnh ``/model``).
+    """
+    if not isinstance(value, str):
+        return ""
+    name = value.strip()
+    return name if _MODEL.match(name) else ""
 
 
 def _layer(raw: Any) -> Dict[str, Any]:
@@ -161,6 +178,9 @@ def _layer(raw: Any) -> Dict[str, Any]:
     soul = _soul(raw.get("soulReminder"))
     if soul:
         out["soulReminder"] = soul
+    model = _model(raw.get("modelOverride"))
+    if model:
+        out["modelOverride"] = model
     return out
 
 
@@ -332,7 +352,38 @@ def group_settings(group_id: str) -> Dict[str, Any]:
     paused = bool(entry.get("paused", folder.get("paused", defaults.get("paused", False))))
     return {"active": active, "reply_only_tagged": reply, "paused": paused, "features": features,
             "soul_reminder": group_soul_reminder(group_id),
+            "model_override": group_model_override(group_id),
             "custom": bool(entry) or str(group_id or "") in (data.get("folder_of") or {})}
+
+
+def group_model_override(group_id: str) -> str:
+    """Model riêng của nhóm đang hiệu lực (``""`` = dùng model chung của bot).
+
+    Lớp gộp: ``groups[id].modelOverride`` ← ``folders[fid].modelOverride``. Nhóm đặt riêng thì thắng thư mục; thư mục
+    đặt thì mọi nhóm trong thư mục dùng chung, từng nhóm vẫn ghi đè được. ``defaults`` không tham gia — model chung
+    là ``model.default`` trong ``config.yaml``, đổi bằng dashboard (Khoá API & Model) hoặc lệnh ``/model``.
+    """
+    data = _load()
+    for layer in ((data.get("groups") or {}).get(str(group_id or "")) or {},
+                  _folder_layer(data, group_id)):
+        model = layer.get("modelOverride")
+        if model:
+            return str(model)
+    return ""
+
+
+def group_model_overrides() -> Dict[str, str]:
+    """``{mã nhóm: model riêng}`` cho mọi nhóm đang ghim — lệnh ``/model`` đọc để nói rõ nhóm nào không đổi theo."""
+    data = _load()
+    out: Dict[str, str] = {}
+    # Phủ mọi nhóm có trong tệp (mục riêng) lẫn mọi nhóm chỉ nằm trong một thư mục — lớp đã gộp qua
+    # group_model_override nên thư mục thắng/không thắng đều ra đúng.
+    ids = set((data.get("groups") or {}).keys()) | set((data.get("folder_of") or {}).keys())
+    for gid in ids:
+        model = group_model_override(gid)
+        if model:
+            out[str(gid)] = model
+    return out
 
 
 def group_soul_reminder(group_id: str) -> str:

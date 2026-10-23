@@ -521,6 +521,36 @@ test('lời nhắc riêng: gửi khi có câu, xoá khi chủ động xoá, im l
   assert.equal('soulReminder' in settingsPayload({ ...base, soulReminder: 'abc' }, { isGroup: false, studioFeatures: SF }), false);
 });
 
+test('model riêng của nhóm: gửi khi có, xoá khi bỏ ghim, đếm là một thay đổi', async () => {
+  const { settingsPayload, changeCount, sameSettings } = await import('./views/permissions.js');
+  const base = { active: true, replyOnlyTagged: true, features: { web: true }, studio: S_OFF, studioQuota: null, modelOverride: '' };
+  const set = { isGroup: true, studioFeatures: SF };
+  // Chọn model: gửi tên đã cắt khoảng trắng.
+  assert.equal(settingsPayload({ ...base, modelOverride: '  Kira/glm-5.3 ' }, set).modelOverride, 'Kira/glm-5.3');
+  // Chưa từng ghim: không gửi khoá, để diffLayer coi nhóm vẫn theo nền.
+  assert.equal('modelOverride' in settingsPayload({ ...base }, set), false);
+  // Bỏ ghim khi đang có: phải gửi chuỗi rỗng, vì vắng mặt nghĩa là giữ nguyên.
+  assert.equal(settingsPayload({ ...base }, { ...set, previous: { modelOverride: 'Kira/glm-5.3' } }).modelOverride, '');
+  assert.equal('modelOverride' in settingsPayload({ ...base }, { ...set, previous: {} }), false);
+  // "Mặc định" không có ô này (model chung đổi ở Khoá API & Model).
+  assert.equal('modelOverride' in settingsPayload({ ...base, modelOverride: 'x' }, { isGroup: false, studioFeatures: SF }), false);
+  // Đếm thay đổi + so sánh: ghim khác rỗng là một thay đổi; bỏ ghim cũng là một.
+  assert.equal(changeCount({ ...base, modelOverride: 'Kira/glm-5.3' }, base), 1);
+  assert.equal(sameSettings({ ...base, modelOverride: 'x' }, base), false);
+  assert.equal(sameSettings({ ...base, modelOverride: 'x' }, { ...base, modelOverride: 'x' }), true);
+});
+
+test('model riêng: máy chủ cũ trả 200 mà bỏ khoá thì giao diện phải báo, không im lặng', async () => {
+  const { modelDropped } = await import('./views/permissions.js');
+  const G = '200';
+  // Bản máy chủ cũ: 200 nhưng `groups[id]` không mang khoá vừa gửi — đúng triệu chứng "chọn mà không lưu được".
+  assert.equal(modelDropped({ groups: { [G]: { name: 'X' } } }, G, { modelOverride: 'AntiGravity' }), true);
+  assert.equal(modelDropped({ groups: { [G]: { name: 'X', modelOverride: 'AntiGravity' } } }, G, { modelOverride: 'AntiGravity' }), false);
+  // Không ghim gì (chuỗi rỗng) thì không có gì để phản ánh — đường bỏ ghim hợp lệ cũng đi qua đây.
+  assert.equal(modelDropped({ groups: { [G]: { name: 'X' } } }, G, { modelOverride: '' }), false);
+  assert.equal(modelDropped({ groups: {} }, G, { modelOverride: 'AntiGravity' }), true, 'thiếu hẳn mục nhóm cũng là bỏ');
+});
+
 test('xưởng: máy Windows khoá nút video (chính sách cài đặt), máy khác không', async () => {
   const { lockedByPolicy, quotaSummary } = await import('./views/studio-box.js');
   assert.equal(quotaSummary('', 3), '3 lượt/người/ngày (mặc định)');
@@ -1154,6 +1184,25 @@ test('tổng quan: cần chú ý gom đúng việc, kèm chỗ xử lý; hội t
   const jobs = [{ id: '1', enabled: true, paused: false, nextRunAt: now + 3600_000 }, { id: '2', enabled: true, paused: true, nextRunAt: now + 60_000 },
     { id: '3', enabled: true, paused: false, nextRunAt: now + 5 * 86400_000 }, { id: '4', enabled: true, paused: false, nextRunAt: now + 600_000 }];
   assert.deepEqual(upcomingJobs(jobs, now).map((j) => j.id), ['4', '1']);
+});
+
+test('tổng quan: tồn đọng tầng não hiện đúng mức — kẹt thì cảnh báo, đang chạy thì chỉ báo nhẹ', async () => {
+  const { attentionItems } = await import('./views/overview.js');
+  const ok = { sidecar: 'up', assistant: 'connected', zalo: { status: 'logged-in', displayName: 'Bot', listener: 'connected' }, lastError: null };
+  const base = { status: ok, admin: true };
+  // Không có số đo (sidecar cũ) → không thêm dòng nào.
+  assert.deepEqual(attentionItems({ ...base, status: { ...ok, brain: null } }), [], 'thiếu số đo thì im lặng');
+  // Tồn đọng nhưng mốc vẫn nhích → chỉ thông tin, và chỉ khi tồn đọng đã cũ.
+  const running = { pendingTopics: 3, pendingFacts: 5, stuckThreads: 0, lagMs: 7 * 3600_000 };
+  const info = attentionItems({ ...base, status: { ...ok, brain: running } });
+  assert.deepEqual(info.map((i) => i.kind), ['info']);
+  assert.match(info[0].text, /3 hội thoại chờ gói chủ đề/);
+  assert.deepEqual(attentionItems({ ...base, status: { ...ok, brain: { ...running, lagMs: 60_000 } } }), [],
+    'tồn đọng mới thì chưa cần báo');
+  // Kẹt thật → cảnh báo.
+  const warn = attentionItems({ ...base, status: { ...ok, brain: { pendingTopics: 4, pendingFacts: 9, stuckThreads: 2, lagMs: 2 * 3600_000 } } });
+  assert.deepEqual(warn.map((i) => i.kind), ['warn']);
+  assert.match(warn[0].text, /2 không nhích quá 30 phút/);
 });
 
 test('phiên chat kiểu Zalo: gộp cụm tin theo người gửi, dải ngày, chữ cái đầu và màu ảnh đại diện', async () => {

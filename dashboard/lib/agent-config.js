@@ -23,8 +23,9 @@ const SNAPSHOT_ID = /^(\d{13}-[a-z0-9_-]{1,32}|original)$/;
 const err = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const splitList = (v) => (Array.isArray(v) ? v.map(String) : String(v ?? '').split(/[,\n]/)).map((s) => s.trim()).filter(Boolean);
 
-export function createAgentConfig({ configFile, envValue = () => null, fetchImpl = fetch }) {
+export function createAgentConfig({ configFile, envValue = () => null, fetchImpl = fetch, modelsCacheMs = 60_000 }) {
   const conf = () => readConfigYaml(configFile);
+  let modelsCache = null;   // { at, list } — chỉ giữ danh sách lấy được, để cổng chậm không làm trắng ô chọn
   return {
     view() {
       const c = conf();
@@ -39,18 +40,29 @@ export function createAgentConfig({ configFile, envValue = () => null, fetchImpl
         zaloHint: String(c?.platform_hints?.zalo?.append || '').slice(0, 4000),
       };
     },
-    /** Danh sách model của cổng AI đang cấu hình (chuẩn OpenAI `/models`). */
-    async models() {
+    /**
+     * Danh sách model của cổng AI đang cấu hình (chuẩn OpenAI `/models`).
+     *
+     * Cổng thật trả ~2400 model / hơn 1 MB nên mất 10–15 giây: hạn chờ cũ 10 s LUÔN hết trước khi cổng kịp
+     * trả, khiến ô chọn model trên Phân quyền Bot trắng danh sách. Hạn chờ 30 s cho cổng chậm, và kết quả
+     * được nhớ `modelsCacheMs` để lần mở trang sau hiện ngay thay vì chờ lại từ đầu.
+     */
+    async models({ fresh = false } = {}) {
+      const hit = !fresh && modelsCache && Date.now() - modelsCache.at < modelsCacheMs ? modelsCache : null;
+      if (hit) return hit.list;
       const m = conf()?.model || {};
       const base = String(m.base_url || '').replace(/\/+$/, '');
       if (!/^https?:\/\//.test(base)) throw err(409, 'config.yaml chưa có model.base_url — báo người cài đặt.');
       let json;
       try {
-        const res = await fetchImpl(`${base}/models`, { headers: m.api_key ? { Authorization: `Bearer ${m.api_key}` } : {}, signal: AbortSignal.timeout(10_000), redirect: 'error' });
+        const res = await fetchImpl(`${base}/models`, { headers: m.api_key ? { Authorization: `Bearer ${m.api_key}` } : {}, signal: AbortSignal.timeout(30_000), redirect: 'error' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         json = await res.json();
       } catch { throw err(502, 'Cổng AI chưa trả danh sách model — thử lại sau ít phút.'); }
-      return (Array.isArray(json?.data) ? json.data : []).map((x) => String(x?.id || '')).filter((id) => MODEL_NAME.test(id)).slice(0, 500);
+      const list = (Array.isArray(json?.data) ? json.data : []).map((x) => String(x?.id || '')).filter((id) => MODEL_NAME.test(id)).slice(0, 500);
+      // Chỉ nhớ danh sách KHÔNG rỗng: cổng trả rỗng là lỗi tạm, nhớ lại sẽ khoá ô chọn vào danh sách trắng.
+      if (list.length) modelsCache = { at: Date.now(), list };
+      return list;
     },
     async setModel(name) {
       const model = String(name ?? '').trim();

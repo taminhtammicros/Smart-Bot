@@ -114,6 +114,37 @@ class ModelCommandTest(unittest.TestCase):
         self.assertEqual(model_command.current_model(self.config), "ag/claude-opus-4-6-thinking")
         self.assertIn("Không có model số 9", self.run_cmd("9"))
 
+    def test_pinned_note_names_groups_that_will_not_follow(self):
+        """Nhóm ghim model riêng không đổi theo /model — câu trả lời phải nói ra, kèm mã nhóm và tên model."""
+        with tempfile.TemporaryDirectory() as home:
+            perm = Path(home, "permissions.json")
+            perm.write_text(json.dumps({"version": 1, "groups": {
+                "2054797107487294899": {"modelOverride": "Kira/glm-5.3"},
+                "2054797107487294811": {"modelOverride": "hermes"},
+            }}), encoding="utf-8")
+            import os as _os
+            with patch.dict(_os.environ, {"ZALO_PERMISSIONS_FILE": str(perm)}):
+                # Đổi sang model X: nhóm ghim đúng X không được nhắc, nhóm ghim model khác thì phải nói ra.
+                to_hermes = model_command._pinned_note("hermes")
+                to_kira = model_command._pinned_note("Kira/glm-5.3")
+                to_other = model_command._pinned_note("cx/gpt-5.4")
+        self.assertIn("2054797107487294899", to_hermes)
+        self.assertIn("Kira/glm-5.3", to_hermes)
+        self.assertIn("KHÔNG đổi theo", to_hermes)
+        self.assertNotIn("2054797107487294811", to_hermes, "nhóm ghim đúng model mới không cần nhắc")
+        self.assertIn("2054797107487294811", to_kira, "đổi sang model khác thì nhóm kia cũng phải nhắc")
+        self.assertNotIn("2054797107487294899", to_kira, "nhóm đang ghim đúng model mới không cần nhắc")
+        self.assertIn("hermes", to_other)
+        self.assertIn("2054797107487294899", to_other)
+
+    def test_pinned_note_survives_a_broken_permissions_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            perm = Path(home, "permissions.json")
+            perm.write_text("{ hỏng", encoding="utf-8")
+            import os as _os
+            with patch.dict(_os.environ, {"ZALO_PERMISSIONS_FILE": str(perm)}):
+                self.assertEqual(model_command._pinned_note("hermes"), "")
+
     def test_fetch_models_reads_endpoint_from_config(self):
         seen = {}
 

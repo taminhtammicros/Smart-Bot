@@ -82,6 +82,7 @@ export function createRuntimeHealth({ store, now = Date.now, staleAfterMs = 45_0
     const stale = staleClientIds();
     const heartbeatTimes = [...clients.values()].map((state) => state.lastHeartbeatAtMs);
     const latestHeartbeat = heartbeatTimes.length ? Math.max(...heartbeatTimes) : null;
+    const brain = database.brain || { pendingTopics: 0, pendingFacts: 0, stuckThreads: 0, lagMs: 0 };
     let status = 'healthy';
     if (!database.ready) status = 'unhealthy';
     else if (
@@ -91,6 +92,9 @@ export function createRuntimeHealth({ store, now = Date.now, staleAfterMs = 45_0
       || stale.length
       || needsRelogin
     ) status = 'degraded';
+    // Kẹt học: còn tồn đọng mà mốc tiến độ không nhích quá 30 phút. Đây chính là trạng thái âm thầm
+    // của sự cố 23/10 — bot vẫn "khoẻ" theo mọi chỉ số khác nhưng không học thêm gì.
+    else if (brain.stuckThreads > 0) status = 'degraded';
 
     return {
       status,
@@ -104,6 +108,9 @@ export function createRuntimeHealth({ store, now = Date.now, staleAfterMs = 45_0
       database,
       backfill: [...backfill.values()].sort((left, right) => left.threadType - right.threadType),
       traffic: { lastInboundAtMs, lastOutboundAtMs },
+      // Tồn đọng tầng não, đọc từ `store.getHealth()`. Nhô lên cấp cao nhất để `/api/health` trả thẳng
+      // và dashboard cảnh báo được mà không phải chui vào `database`.
+      brain: database.brain || { pendingTopics: 0, pendingFacts: 0, stuckThreads: 0, lagMs: 0 },
       lastError,
     };
   }

@@ -178,7 +178,16 @@ export const MAX_SOUL = 1000;
 // eslint-disable-next-line no-control-regex
 const tidySoul = (v) => (typeof v === 'string' ? v.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').replace(/\s+/g, ' ').trim().slice(0, MAX_SOUL) : '');
 
-/** Một lớp: chỉ giữ khoá biết và đúng kiểu — giống `_layer` bên Python (9 nút + 4 nút xưởng + hạn mức xưởng + nhắc riêng). */
+/**
+ * Model riêng của nhóm/thư mục (`modelOverride`): một tên model, tối đa 120 ký tự, cùng bộ ký tự với
+ * `MODEL_NAME` bên lib/agent-config.js và `_MODEL` bên group_permissions.py.
+ * Để trống = theo lớp trên (thư mục, rồi model chung của bot).
+ */
+export const MODEL_NAME = /^[A-Za-z0-9._/@:+-]{1,120}$/;
+export const MAX_MODEL = 120;
+const tidyModel = (v) => (typeof v === 'string' ? v.trim().replace(/\s+/g, '').slice(0, MAX_MODEL) : '');
+
+/** Một lớp: chỉ giữ khoá biết và đúng kiểu — giống `_layer` bên Python (9 nút + 4 nút xưởng + hạn mức xưởng + nhắc riêng + model riêng). */
 function layer(raw) {
   if (!isObj(raw)) return {};
   const out = {};
@@ -188,6 +197,8 @@ function layer(raw) {
   for (const k of QUOTA_KEYS) if (isQuota(raw[k])) out[k] = raw[k];
   const soul = tidySoul(raw.soulReminder);
   if (soul) out.soulReminder = soul;
+  const model = tidyModel(raw.modelOverride);
+  if (model && MODEL_NAME.test(model)) out.modelOverride = model;
   return out;
 }
 
@@ -249,9 +260,10 @@ export function normalize(raw) {
   // Mục `tools` (giai đoạn 7B, spec §18.6): công cụ tắt riêng với người không phải chủ nhân — cũng phải sống qua mọi lần lưu.
   const tools = normalizeTools(raw.tools);
   const folders = normalizeFolders(raw.folders);
-  // Lớp `defaults` không giữ `soulReminder`: lời nhắc toàn cục là ZALO_SOUL_REMINDER (trang Cấu hình), còn lời nhắc
-  // riêng thuộc về từng nhóm/thư mục. Ghi nó vào đây sẽ thành nguồn sự thật thứ hai cho cùng một việc.
-  const { soulReminder: _soul, ...defaults } = layer(raw.defaults);
+  // Lớp `defaults` không giữ `soulReminder` lẫn `modelOverride`: lời nhắc toàn cục là ZALO_SOUL_REMINDER (trang Cấu
+  // hình), model chung là `model.default` của config.yaml; cả hai thứ riêng kia thuộc về từng nhóm/thư mục. Ghi vào
+  // đây sẽ thành nguồn sự thật thứ hai cho cùng một việc.
+  const { soulReminder: _soul, modelOverride: _model, ...defaults } = layer(raw.defaults);
   return { version: 1, defaults, groups, ...(Object.keys(folders).length ? { folders } : {}),
     ...(dm ? { dm } : {}), ...(studio ? { studio } : {}), ...(tools ? { tools } : {}) };
 }
@@ -403,6 +415,15 @@ function parseSettings9(body) {
     if (body.soulReminder.trim().length > MAX_SOUL) throw new InvalidPermissions(`Dòng nhắc riêng dài quá ${MAX_SOUL} ký tự — rút gọn bớt.`);
     out.soulReminder = tidySoul(body.soulReminder);
   }
+  // Model riêng của nhóm/thư mục: không gửi = giữ nguyên; chuỗi rỗng = theo lớp trên. Tên phải tra được ở
+  // cổng AI — route kiểm với `agentConfig.models()` trước khi lưu (xem routes/permissions.js).
+  if (body.modelOverride !== undefined) {
+    if (typeof body.modelOverride !== 'string') throw new InvalidPermissions('Model riêng phải là chữ — tải lại trang rồi thử lại.');
+    const model = tidyModel(body.modelOverride);
+    if (body.modelOverride.trim().length > MAX_MODEL) throw new InvalidPermissions(`Tên model dài quá ${MAX_MODEL} ký tự — chọn lại trong danh sách.`);
+    if (model && !MODEL_NAME.test(model)) throw new InvalidPermissions('Tên model có ký tự lạ — chọn lại trong danh sách.');
+    out.modelOverride = model;
+  }
   return out;
 }
 
@@ -424,9 +445,12 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
       features: { ...base.features, ...pickBools(l.features, FEATURE_KEYS) },
       studio: { ...base.studio, ...pickBools(l.features, STUDIO_KEYS) },
     };
-    // Lời nhắc riêng chỉ xuất hiện khi có: lớp nền không mang khoá này (toàn cục là ZALO_SOUL_REMINDER).
+    // Lời nhắc riêng và model riêng chỉ xuất hiện khi có: lớp nền không mang hai khoá này (toàn cục là
+    // ZALO_SOUL_REMINDER và model.default của config.yaml).
     const soul = l.soulReminder ?? base.soulReminder;
     if (soul) out.soulReminder = soul;
+    const model = l.modelOverride ?? base.modelOverride;
+    if (model) out.modelOverride = model;
     return out;
   };
 
@@ -520,12 +544,18 @@ export function createPermissionsStore({ file, globalReplyOnlyTagged = true, dmE
       if (quota !== null && quota !== base[k]) entry[k] = quota;
     }
     // Lời nhắc riêng: chỉ ghi khi khác nền; để trống (hoặc bằng nền) = theo thư mục, không có thì thôi.
-    // `changed` so với mục đã lưu để lần xoá lời nhắc riêng cũng được báo là có thay đổi.
+    // `changed` = danh sách khoá THỰC SỰ đổi so với mục đã lưu (không phải "khác nền"), để dòng Nhật ký chỉ
+    // nói ra việc vừa xảy ra: lưu lại y nguyên thì không có dòng nào, còn bỏ lời nhắc riêng/bỏ ghim model
+    // (xoá một khoá đang có) vẫn được tính là có thay đổi.
     const soul = tidySoul(settings.soulReminder ?? '');
     if (soul && soul !== (base.soulReminder || '')) entry.soulReminder = soul;
-    const soulChanged = soul !== tidySoul(prev.soulReminder ?? '');
+    const soulChanged = (entry.soulReminder ?? '') !== tidySoul(prev.soulReminder ?? '');
+    // Model riêng: cùng quy tắc — để trống hoặc trùng nền nghĩa là theo lớp trên (thư mục, rồi model chung).
+    const model = tidyModel(settings.modelOverride ?? '');
+    if (model && MODEL_NAME.test(model) && model !== (base.modelOverride || '')) entry.modelOverride = model;
+    const modelChanged = (entry.modelOverride ?? '') !== tidyModel(prev.modelOverride ?? '');
     const changed = [...SWITCHES.filter((k) => settings[k] !== base[k]), ...Object.keys(features), ...QUOTA_KEYS.filter((k) => k in entry),
-      ...(soulChanged ? ['soulReminder'] : [])];
+      ...(soulChanged ? ['soulReminder'] : []), ...(modelChanged ? ['modelOverride'] : [])];
     return { entry, changed };
   };
 

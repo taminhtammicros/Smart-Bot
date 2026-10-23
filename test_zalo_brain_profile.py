@@ -48,6 +48,9 @@ def _schema(db):
         thread_type INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '', abstract TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'open', first_ts_ms INTEGER NOT NULL DEFAULT 0, last_ts_ms INTEGER NOT NULL DEFAULT 0,
         message_count INTEGER NOT NULL DEFAULT 0, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+      CREATE TABLE kb_brain_progress (account_id TEXT NOT NULL, scope TEXT NOT NULL,
+        last_msg_ms INTEGER NOT NULL DEFAULT 0, last_run_ms INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(account_id, scope));
     """)
     con.commit()
     con.close()
@@ -67,6 +70,19 @@ def _add_fact(db, scope, subject, content, *, at=None, origin="extract", status=
     con.commit()
     con.close()
 
+
+
+def _add_msg(db, thread_id, *, topic_id=None, at=None, thread_type=1, text="xin chào"):
+    """Một tin trong kho — cần cho các test đi qua `_topic_candidates`/`_fact_candidates`."""
+    stamp = int(time.time() * 1000) if at is None else at
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO messages (identity_key, account_id, thread_id, thread_type, sender_uid, sender_name, "
+        "text, msg_type, timestamp_ms, is_self, source, created_at_ms, updated_at_ms, topic_id) "
+        "VALUES (?, ?, ?, ?, 'u1', 'Lan', ?, 'webchat', ?, 0, 'live', ?, ?, ?)",
+        (f"{thread_id}-{stamp}-{text[:8]}", ACCOUNT, str(thread_id), thread_type, text, stamp, stamp, stamp, topic_id))
+    con.commit()
+    con.close()
 
 class _Result:
     def __init__(self, text):
@@ -92,9 +108,15 @@ class ProfileTest(unittest.TestCase):
         self.db = os.path.join(self.dir, "zalo.sqlite")
         _schema(self.db)
         os.environ["ZALO_SQLITE_FILE"] = self.db
+        # Cô lập cài đặt: không đặt thì `settings_path()` trỏ vào `<HERMES_HOME>/zalo/brain.json` thật,
+        # nên một máy đang tắt worker (enabled:false) sẽ làm đỏ test chẳng liên quan tới cài đặt đó.
+        os.environ["ZALO_BRAIN_FILE"] = os.path.join(self.dir, "absent-brain.json")
+        bj._SETTINGS_CACHE["key"] = None
 
     def tearDown(self):
         os.environ.pop("ZALO_SQLITE_FILE", None)
+        os.environ.pop("ZALO_BRAIN_FILE", None)
+        bj._SETTINGS_CACHE["key"] = None
 
     def _bare(self):
         """Chữ hồ sơ sau khi bỏ vỏ bọc model hay thêm."""
@@ -238,14 +260,125 @@ class ProfileTest(unittest.TestCase):
     # -- vòng chạy ---------------------------------------------------------
 
     def test_run_once_gop_ho_so_sau_khi_trich_tri_thuc(self):
+        # Tin ĐÃ GÁN chủ đề (topic_id) — điều kiện vào `_fact_candidates`. Thiếu tin thì vòng chạy
+        # không có gì để trích, nên hồ sơ cũng không được gộp.
+        for i in range(3):
+            _add_msg(self.db, "2054797107487294899", topic_id=7, text=f"tin {i}")
         _add_fact(self.db, SCOPE, "giá", "Chốt 60k")
         llm = FakeLLM()
         bj.run_once(lambda: llm)
+        self.assertIn("zalo-brain-facts", llm.calls, "có tin chờ thì phải trích tri thức")
         self.assertIn("zalo-brain-profile", llm.calls, "vòng chạy phải gọi cả phần hồ sơ")
         con = sqlite3.connect(self.db)
         body = con.execute("SELECT body FROM profiles WHERE scope = ?", (SCOPE,)).fetchone()
         con.close()
         self.assertTrue(body and body[0].startswith("- "), f"hồ sơ phải được ghi: {body}")
+
+    # -- chống lặp: mốc tiến độ ---------------------------------------------
+
+    def test_moc_tien_do_chan_chon_lai_pham_vi_da_xem(self):
+        """Thiếu mốc thì phạm vi đã xử lý vẫn được chọn lại mãi — vòng lặp gọi model mỗi 30 giây."""
+        for i in range(3):
+            _add_msg(self.db, "2054797107487294899", topic_id=7, text=f"tin {i}")
+        con = bj.connect_ro()
+        self.assertEqual(len(bj._fact_candidates(con)), 1, "lần đầu phải thấy phạm vi còn tin chưa xem")
+        row = bj._fact_candidates(con)[0]
+        # Lượt chạy xong: mốc được ghi kể cả khi model không trích được fact nào.
+        bj._run_facts(con, FakeLLM(text='{"facts":[]}'), row, 25)
+        con.close()
+        con = bj.connect_ro()
+        self.assertEqual(bj._fact_candidates(con), [], "đã xem hết thì đừng chọn lại")
+        con.close()
+
+    def test_tin_moi_hon_moc_thi_chon_lai(self):
+        for i in range(3):
+            _add_msg(self.db, "2054797107487294899", topic_id=7, text=f"tin {i}")
+        con = bj.connect_ro()
+        row = bj._fact_candidates(con)[0]
+        seen = max(int(r["timestamp_ms"]) for r in con.execute(
+            "SELECT timestamp_ms FROM messages WHERE topic_id IS NOT NULL"))
+        bj._run_facts(con, FakeLLM(text='{"facts":[]}'), row, 25)
+        con.close()
+        for i in range(3):
+            _add_msg(self.db, "2054797107487294899", topic_id=7, at=seen + 60_000, text=f"moi {i}")
+        con = bj.connect_ro()
+        self.assertEqual(len(bj._fact_candidates(con)), 1, "có tin mới hơn mốc thì phải trích tiếp")
+        con.close()
+
+    def test_hoi_thoai_co_chu_de_mo_van_duoc_goi_lai(self):
+        """Chủ đề mở KHÔNG được chặn vòng sau: `_run_topic` tự đóng nó trước khi gói chủ đề mới.
+
+        Luật cũ (loại hội thoại có chủ đề `open`) làm hội thoại đang hoạt động kẹt vĩnh viễn — đo 23/10:
+        nhóm 3430869407275128341 tồn 743 tin bên cạnh một chủ đề mở từ hôm trước, tổng 1281 tin không
+        bao giờ được học.
+        """
+        con = sqlite3.connect(self.db)
+        con.execute(
+            "INSERT INTO topics (account_id, thread_id, thread_type, title, status, created_at_ms, updated_at_ms) "
+            "VALUES (?, '2054797107487294899', 1, 'Chủ đề đang mở', 'open', ?, ?)",
+            (ACCOUNT, int(time.time() * 1000), int(time.time() * 1000)))
+        con.commit()
+        con.close()
+        quiet = 20 * 60_000
+        now = int(time.time() * 1000)
+        for i in range(8):
+            _add_msg(self.db, "2054797107487294899", at=now - quiet - 60_000 - i * 1000, text=f"tin {i}")
+        con = bj.connect_ro()
+        self.assertEqual(len(bj._topic_candidates(con, quiet, now)), 1,
+                         "còn tin chờ thì phải gói tiếp, chủ đề mở không được chặn")
+        row = bj._topic_candidates(con, quiet, now)[0]
+        llm = FakeLLM(text='{"title":"Chủ đề mới","summary":"","message_ids":[]}')
+        self.assertTrue(bj._run_topic(con, llm, row, now), "gói được chủ đề mới sau khi đóng chủ đề cũ")
+        con.close()
+        con = sqlite3.connect(self.db)
+        opened = con.execute(
+            "SELECT COUNT(*) FROM topics WHERE thread_id = '2054797107487294899' AND status = 'open'").fetchone()[0]
+        all_topics = con.execute(
+            "SELECT COUNT(*) FROM topics WHERE thread_id = '2054797107487294899'").fetchone()[0]
+        unassigned = con.execute(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = '2054797107487294899' AND topic_id IS NULL").fetchone()[0]
+        con.close()
+        self.assertEqual(opened, 1, "chỉ một chủ đề mở tại một thời điểm")
+        self.assertEqual(all_topics, 2, "chủ đề cũ phải được ĐÓNG, không xoá")
+        self.assertEqual(unassigned, 0, "tin chờ phải được gán vào chủ đề mới")
+
+    def test_nhom_dang_chat_van_duoc_goi_chu_de(self):
+        """Nhóm sôi động không bao giờ 'im 120 phút' — luật cũ khiến nó không bao giờ được học.
+
+        Nay chỉ cần lô tin đã lắng `TOPIC_LULL_MINUTES`; tin cuối cách đây 10 phút là đủ.
+        """
+        now = int(time.time() * 1000)
+        quiet = 120 * 60_000                      # cài đặt người dùng: 120 phút
+        for i in range(8):
+            _add_msg(self.db, "8022259598120952176", at=now - 10 * 60_000 - i * 1000, text=f"tin {i}")
+        con = bj.connect_ro()
+        rows = bj._topic_candidates(con, quiet, now)
+        con.close()
+        self.assertEqual(len(rows), 1, "tin cuối cách 10 phút > TOPIC_LULL_MINUTES(5) thì phải gói được")
+
+    def test_hoi_thoai_dang_noi_do_dang_thi_chua_goi(self):
+        """Tin cuối mới 30 giây → còn đang nói dở, đừng cắt giữa lượt."""
+        now = int(time.time() * 1000)
+        for i in range(8):
+            _add_msg(self.db, "8022259598120952176", at=now - 30_000 - i * 1000, text=f"tin {i}")
+        con = bj.connect_ro()
+        rows = bj._topic_candidates(con, 120 * 60_000, now)
+        con.close()
+        self.assertEqual(rows, [], "tin cuối mới 30 giây thì chờ thêm")
+
+    def test_goi_chu_de_that_bai_khong_bi_goi_lai(self):
+        """Model trả JSON sai dạng → tin vẫn `topic_id IS NULL`; không ghi mốc thì vòng sau gọi lại mãi."""
+        now = int(time.time() * 1000)
+        quiet = 120 * 60_000
+        for i in range(8):
+            _add_msg(self.db, "8022259598120952176", at=now - quiet - 60_000 - i * 1000, text=f"tin {i}")
+        con = bj.connect_ro()
+        self.assertEqual(len(bj._topic_candidates(con, quiet, now)), 1, "hội thoại đủ tin, im đủ lâu")
+        row = bj._topic_candidates(con, quiet, now)[0]
+        # Model trả rác: `_parse_json_object` không ra dict có title → lượt hỏng.
+        self.assertFalse(bj._run_topic(con, FakeLLM(text="xin lỗi, tôi không trả JSON"), row, now))
+        self.assertEqual(bj._topic_candidates(con, quiet, now), [], "đã xem xét thì đừng gọi model lại")
+        con.close()
 
     def test_tat_bang_brain_json_thi_khong_lam_gi(self):
         import json

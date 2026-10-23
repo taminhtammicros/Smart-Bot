@@ -2,6 +2,64 @@
 
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
+## [2.54.0] — 2026-10-22
+
+### Mới — Mỗi nhóm chát một model riêng (Phân quyền Bot)
+
+- Trang Phân quyền Bot có mục **Model riêng của nhóm** (và **của thư mục**): lọc + chọn trong danh sách lấy từ cổng AI
+  (gồm cả combo), để trống = theo model chung. Lớp gộp như dòng nhắc riêng: `groups[id].modelOverride` ←
+  `folders[fid].modelOverride`; nhóm đặt riêng thì thắng thư mục, thư mục ghim thì mọi nhóm bên trong dùng chung.
+- Hiệu lực ngay từ tin kế tiếp, không cần khởi động lại: adapter ghim model vào **phiên của đúng hội thoại**
+  (`_session_model_overrides` của Hermes, thứ tự phiên → `channel_overrides` → `model.default`) rồi bỏ tác nhân đang
+  giữ trong bộ nhớ đệm để lượt sau dựng lại. Không đụng `config.yaml`, nên đổi model chung vẫn là việc của
+  Khoá API & Model / lệnh `/model`.
+- Nhóm ghim **thắng** `/model`: lệnh của chủ nhân vẫn đổi model chung cho mọi nhóm khác, và câu trả lời liệt kê đúng
+  nhóm nào đang ghim model khác nên không đổi theo (`_pinned_note`). Lựa chọn `/model` của chủ nhân gõ trong chính
+  nhóm đó được giữ lại, bỏ ghim là trả về đúng nó.
+- Dashboard kiểm tên model với `<model.base_url>/models` trước khi lưu (như lệnh `/model`); tên sai → 400 kèm cách sửa.
+  Nhật ký ghi `model riêng: <tên>`. Model chung không bao giờ rơi vào `defaults` của `permissions.json`.
+
+**Đo:** `dashboard/lib/permissions.test.js` 29/29 (lớp ghim: nhóm, thư mục, bỏ ghim, tên lạ, không rơi vào defaults);
+`dashboard/routes/permissions.test.js` 16/16 (400 khi cổng AI không có model, Nhật ký nêu tên model, Quản trị + Chủ bot);
+`test_zalo_permissions.py` 92/92 (thêm `GroupModelOverrideTest`); `test_zalo_model_command.py` 18/18 (`_pinned_note`);
+`dashboard/public/public.test.js` 84/84. Smoke trên dashboard thật (dựng riêng một cổng): đăng nhập Quản trị → chọn
+`Kira/glm-5.3` cho nhóm → Lưu → `permissions.json` có đúng khoá → plugin đọc `group_model_override()` ra đúng tên →
+bỏ ghim thì mục nhóm biến mất, Nhật ký ghi `model riêng: Kira/glm-5.3`. Ghim phiên: kịch bản in-process 7 bước
+(ghim, không evict khi trùng, đổi model, bỏ ghim, giữ `/model` của chủ nhân, giữ `/model --once`, thoát êm khi lõi đổi tên hàm).
+
+### Sửa — "Chọn model riêng mà lưu không được" khi dashboard chưa nạp mã mới
+
+- Triệu chứng: chọn model cho nhóm, bấm Lưu, máy chủ trả 200 nhưng thanh lưu vẫn ghi "1 thay đổi chưa lưu"; tệp
+  `permissions.json` không có `modelOverride`. Nguyên nhân: **tiến trình dashboard đang chạy đã nạp mã cũ** (Node giữ
+  mã trong RAM), nên `parseSettings` không biết khoá này và `setGroup` ghi đè mà bỏ nó — hỏng im lặng.
+- Giao diện nay tự phát hiện: gửi tên model mà phản hồi không mang nó trở lại → báo thẳng
+  *"Máy chủ chưa hiểu mục Model riêng — bản dashboard đang chạy còn cũ. Khởi động lại dashboard rồi lưu lại."*
+  (`modelDropped`) thay vì để người dùng đoán.
+- `diffLayer`: `changed` trả về đúng khoá **thực sự đổi so với mục đã lưu**, không còn thổi phồng mỗi lần lưu lại y
+  nguyên (trước đó `soulReminder`/`modelOverride` luôn được tính là "có thay đổi", làm dòng Nhật ký sai).
+
+**Đo:** `dashboard/public/public.test.js` 86/86 (thêm gửi/xoá khoá model + `modelDropped` cho máy chủ cũ);
+`dashboard/lib/permissions.test.js` 29/29 (thêm "lưu lại y nguyên → `changed` rỗng");
+`dashboard/routes/permissions.test.js` 16/16. Smoke trên dashboard dựng riêng: chọn `AntiGravity` → Lưu →
+thanh lưu về "Chưa có thay đổi.", hộp đổi thành "đang ghim AntiGravity"; đối chiếu với bản máy chủ cũ trên cùng
+thân request: state trả về **không** có `modelOverride` (đúng dấu hiệu mà giao diện mới báo ra).
+
+### Sửa — Ô "Model riêng" trắng danh sách vì cổng AI chậm hơn hạn chờ
+
+- Triệu chứng: mở Phân quyền Bot, ô Model riêng chỉ còn "Theo thư mục / model chung" — không có model nào để chọn.
+- Nguyên nhân đo được: cổng AI trả `/v1/models` mất **11,5–13,2 giây** (2423 model, ~1,08 MB), còn
+  `agentConfig.models()` đặt `AbortSignal.timeout(10_000)` → **luôn hết hạn trước khi cổng kịp trả**, nên danh
+  sách về rỗng kèm `listError` mà khung sửa chỉ ghi "Chưa đọc được danh sách model".
+- Hạn chờ nâng lên 30 giây; danh sách lấy được **nhớ 60 giây** (`modelsCacheMs`) nên mở trang sau hiện ngay thay
+  vì chờ lại từ đầu. Danh sách **rỗng không được nhớ** — cổng trả rỗng là lỗi tạm, nhớ lại sẽ khoá ô chọn vào
+  danh sách trắng.
+- `GET /api/admin/ai/models?fresh=1` (nút **Tải lại danh sách**) bỏ qua bản đã nhớ. Khung sửa nay hiện lý do cụ
+  thể kèm nút đó thay vì câu chung, và nói rõ lần đầu có thể chờ 10–15 giây.
+
+**Đo:** `dashboard/lib/agent-config.test.js` 11/11 (thêm: cổng chậm vẫn lấy được + nhớ kết quả + `fresh` hỏi lại;
+rỗng không nhớ; cổng im → 502). Smoke với **cổng AI thật** (`localhost:20128`): ô Model riêng của nhóm `3T - AI`
+hiện **201 lựa chọn**, giữ đúng giá trị đang ghim `AntiGravity`, có cả `NANO-FREE-COMBO` — trước khi sửa là 0.
+
 ## [2.53.0] — 2026-10-22
 
 ### Mới — Hồ sơ gộp tự động theo phạm vi (spec §21.3)

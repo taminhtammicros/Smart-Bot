@@ -18,7 +18,8 @@ export function aiConfigRoutes({ aiKeys, aiModels, agentConfig, mediaEngines, re
   r.get('/admin/ai/models', ...guard, async (req, res) => {
     try {
       let list = []; let listError = '';
-      try { list = await agentConfig.models(); } catch (e) { listError = e.message; }
+      // `?fresh=1` (nút "Tải lại" ở giao diện) bỏ qua danh sách đã nhớ — cổng vừa thêm model thì thấy ngay.
+      try { list = await agentConfig.models({ fresh: req.query?.fresh === '1' }); } catch (e) { listError = e.message; }
       const v = agentConfig.view();
       res.json({ ok: true, ...aiModels.view(), models: list, listError, choices: v.choices, defaultModel: v.defaultModel });
     } catch (err) { fail(res, err, 'Chưa đọc được cấu hình model.'); }

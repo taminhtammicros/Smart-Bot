@@ -274,6 +274,47 @@ class GroupSoulReminderTest(PermissionsFile, unittest.TestCase):
         self.assertLessEqual(len(soul), gp.SOUL_REMINDER_MAX)
 
 
+
+class GroupModelOverrideTest(PermissionsFile, unittest.TestCase):
+    """Model riêng của nhóm/thư mục: adapter ghim vào phiên theo từng nhóm, lệnh /model nói rõ nhóm nào không đổi theo."""
+
+    def test_each_group_gets_its_own_model(self):
+        self.write({"version": 1,
+                    "groups": {GROUP_A: {"modelOverride": "Kira/glm-5.3"},
+                               GROUP_B: {"modelOverride": "cx/gpt-5.4"}}})
+        self.assertEqual(gp.group_model_override(GROUP_A), "Kira/glm-5.3")
+        self.assertEqual(gp.group_model_override(GROUP_B), "cx/gpt-5.4")
+        self.assertEqual(gp.group_settings(GROUP_A)["model_override"], "Kira/glm-5.3")
+
+    def test_group_without_model_falls_back_to_the_shared_one(self):
+        self.write({"version": 1, "groups": {GROUP_A: {"modelOverride": "Kira/glm-5.3"}}})
+        self.assertEqual(gp.group_model_override(GROUP_B), "")
+        # `defaults` không phải lớp của model riêng: model chung nằm ở model.default của config.yaml.
+        self.write({"version": 1, "defaults": {"modelOverride": "khong-duoc-dung"}, "groups": {}})
+        self.assertEqual(gp.group_model_override(GROUP_B), "")
+
+    def test_group_overrides_its_folder(self):
+        self.write({"version": 1, "folders": {"lop": {"name": "Lớp", "groups": [GROUP_A, GROUP_B],
+                                                      "modelOverride": "cx/gpt-5.4"}},
+                    "groups": {GROUP_A: {"modelOverride": "Kira/glm-5.3"}}})
+        self.assertEqual(gp.group_model_override(GROUP_A), "Kira/glm-5.3")
+        self.assertEqual(gp.group_model_override(GROUP_B), "cx/gpt-5.4")
+
+    def test_overrides_map_covers_folders_and_direct_entries(self):
+        self.write({"version": 1, "folders": {"lop": {"name": "Lớp", "groups": [GROUP_B],
+                                                      "modelOverride": "cx/gpt-5.4"}},
+                    "groups": {GROUP_A: {"modelOverride": "Kira/glm-5.3"}}})
+        self.assertEqual(gp.group_model_overrides(), {GROUP_A: "Kira/glm-5.3", GROUP_B: "cx/gpt-5.4"})
+
+    def test_bad_names_are_ignored(self):
+        for bad in ("a b", "", "x" * 200, "mo;del", 42, None):
+            self.write({"version": 1, "groups": {GROUP_A: {"modelOverride": bad}}})
+            self.assertEqual(gp.group_model_override(GROUP_A), "", repr(bad))
+        # Tên hợp lệ có khoảng trắng quanh (dán kèm xuống dòng) vẫn nhận, đã cắt gọn.
+        self.write({"version": 1, "groups": {GROUP_A: {"modelOverride": "  Kira/glm-5.3  "}}})
+        self.assertEqual(gp.group_model_override(GROUP_A), "Kira/glm-5.3")
+
+
 class BomTest(PermissionsFile, unittest.TestCase):
     def test_hand_edited_file_with_bom_is_read(self):
         with open(self.path, "w", encoding="utf-8-sig") as fh:
