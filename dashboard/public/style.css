@@ -969,13 +969,6 @@ button.flow-node:hover { border-color: var(--brand); }
 .community-links { border-top: 1px solid var(--border); padding-top: 10px; }
 .community-links ul { margin: 6px 0 0; padding-left: 18px; }
 .community-links li { margin: 4px 0; }
-.update-pill {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 14px; border-radius: 999px;
-  background: rgba(255, 255, 255, .18); color: inherit; border: 1px solid rgba(255, 255, 255, .55);
-  font-size: 14px; font-weight: 700; text-decoration: none;
-}
-a.update-pill:hover { background: rgba(255, 255, 255, .3); }
-.strip-warn .update-pill, .strip-idle .update-pill { border-color: currentColor; background: transparent; }
 
 /* ---------- Điện thoại: thanh điều hướng dưới, khung chat toàn màn hình, gọn chỗ (2026-10) ---------- */
 @media (max-width: 760px) {
@@ -1005,12 +998,9 @@ a.update-pill:hover { background: rgba(255, 255, 255, .3); }
   .strip { flex-wrap: nowrap; gap: 8px; padding: 8px 12px; font-size: 13.5px; line-height: 1.35; }
   .strip-text { flex: 1 1 auto; min-width: 0; }
   .strip-actions { flex: none; flex-wrap: nowrap; gap: 6px; }
-  .strip .btn-light { padding-inline: 10px; }
-  .donate-pill, .update-pill { min-height: 40px; padding: 6px 12px; font-size: 13px; }
+  .donate-pill { min-height: 40px; padding: 6px 12px; font-size: 13px; }
   .donate-more { display: none; }
   .community-pill { min-height: 40px; padding: 6px 12px; font-size: 13px; }
-  .community-more { display: none; }
-  .update-pill .update-more { display: none; }
 
   /* Gọn lề: nhiều chỗ hơn cho nội dung. */
   .content { padding: 14px 12px 20px; }
@@ -1286,6 +1276,7 @@ a.metric:hover { color: inherit; background: var(--surface); }
 .ov-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
 .ov-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); font-size: 13px; font-weight: 600; color: inherit; text-decoration: none; }
 .ov-pill.is-ok { color: var(--ok-text); } .ov-pill.is-warn { color: var(--warn-text); background: var(--warn-soft); } .ov-pill.is-danger { color: var(--danger-text); background: var(--danger-soft); }
+.ov-pill.is-idle { color: var(--muted); }
 .ov-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .ov-head h2 { margin: 0; font-size: 17px; flex: 1; }
 .ov-more { font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 2px; }

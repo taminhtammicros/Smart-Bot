@@ -307,12 +307,12 @@ Nếu dự án này hay và hữu ích với anh chị, một ly cà phê ủng 
 If this project is useful to you, you can buy the author a coffee via Vietnamese bank transfer (VietQR):
 
 <p align="center">
-  <img src="docs/images/donate-qr.jpg" width="240" alt="VietQR — MB Bank 0328186264 LUONG HAI ANH">
+  <img src="docs/images/donate-qr.jpg" width="240" alt="VietQR — MB Bank 0988328338 TA MINH TAM">
 </p>
 
 | Ngân hàng / Bank | Số tài khoản / Account | Chủ tài khoản / Name |
 |---|---|---|
-| MB Bank | `0328186264` | LUONG HAI ANH |
+| MB Bank | `0988328338` | TA MINH TAM |
 
 The same QR is in the admin dashboard (the **Ủng hộ tác giả** button on the status bar at the top of every page).
 

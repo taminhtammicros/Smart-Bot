@@ -20,7 +20,7 @@ function setup(t, { env = ENV, config = CONFIG, inherited = {} } = {}) {
 const pick = (view, id) => view.find((x) => x.id === id);
 
 test('danh sách cố định: không khoá bí mật nào; mỗi mục có kiểu, nhóm, đích khởi động lại', () => {
-  assert.equal(SETTINGS.length, 16);
+  assert.equal(SETTINGS.length, 15);
   assert.deepEqual(SETTINGS.filter((s) => s.restart.length).map((s) => s.id), ['friendTools', 'historyDays'], 'còn lại áp dụng ngay');
   for (const s of SETTINGS) {
     assert.doesNotMatch(s.env, /KEY|TOKEN|SECRET|PASSWORD/, s.env);
@@ -41,17 +41,15 @@ test('đọc đúng thứ tự ưu tiên của adapter: config.yaml thắng .env
 
 test('lưu: ghi vào đúng nơi đang có hiệu lực, giữ dòng khác; không đổi thì không ghi; trả danh sách đổi + đích khởi động lại', (t) => {
   const { d, s } = setup(t);
-  const changes = s.save({ floodThreshold: 10, ownerOnlyGroups: ['111', '333'], friendTools: true, kbPublicDirs: ['Năm 2026', 'Văn bản'] });
-  assert.deepEqual(changes.map((c) => [c.id, c.restart]), [['floodThreshold', []], ['ownerOnlyGroups', []], ['kbPublicDirs', []]]);
+  const changes = s.save({ floodThreshold: 10, ownerOnlyGroups: ['111', '333'], friendTools: true });
+  assert.deepEqual(changes.map((c) => [c.id, c.restart]), [['floodThreshold', []], ['ownerOnlyGroups', []]]);
   const env = readFileSync(join(d, '.env'), 'utf8');
   assert.match(env, /^OPENAI_API_KEY=sk-bimat$/m);
   assert.match(env, /^ZALO_FLOOD_THRESHOLD=10$/m);
-  assert.match(env, /^ZALO_KB_PUBLIC_DIRS="Năm 2026,Văn bản"$/m);
   assert.doesNotMatch(env, /ZALO_OWNER_ONLY_GROUPS/, 'khoá đang ở config.yaml thì sửa config.yaml');
   const y = YAML.parse(readFileSync(join(d, 'config.yaml'), 'utf8'));
   assert.deepEqual(y.platforms.zalo.extra.owner_only_groups, ['111', '333']);
   assert.equal(y.platforms.zalo.extra.bridge_token, 'bi-mat');
-  assert.equal(pick(s.view(), 'kbPublicDirs').value.join('|'), 'Năm 2026|Văn bản');
   assert.ok(existsSync(join(d, '.env.bak')) && existsSync(join(d, 'config.yaml.bak')), 'có bản .bak');
   assert.deepEqual(s.save({ floodThreshold: 10 }), [], 'không đổi thì không ghi');
 });
@@ -63,8 +61,6 @@ test('kiểm giá trị: kiểu, giới hạn, ký tự; khoá ngoài danh sách
   assert.throws(() => validateSetting(def('floodThreshold'), '8'), /số nguyên/);
   assert.throws(() => validateSetting(def('dmPolicy'), 'everyone'), /chọn lại/);
   assert.throws(() => validateSetting(def('ownerOnlyGroups'), ['12a']), /không hợp lệ/);
-  assert.throws(() => validateSetting(def('kbPublicDirs'), ['..']), /không hợp lệ/);
-  assert.throws(() => validateSetting(def('kbPublicDirs'), ['a"\nOPENAI_API_KEY=x']), /không hợp lệ/);
   assert.throws(() => validateSetting(def('publicMcp'), ['rag;rm']), /không hợp lệ/);
   assert.throws(() => validateSetting(def('friendTools'), 'true'), /bật hoặc tắt/);
   assert.throws(() => s.save({ OPENAI_API_KEY: 'x' }), /không nằm trong danh sách/);

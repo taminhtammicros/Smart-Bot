@@ -58,7 +58,7 @@ function store(t) {
   const root = join(dir, 'kho');
   const foldersFile = join(dir, 'kb-folders.json');
   mkdirSync(root);
-  return { root, foldersFile, kb: createKbStore({ kbDir: () => root, publicDirs: () => '', foldersFile }) };
+  return { root, foldersFile, kb: createKbStore({ kbDir: () => root, foldersFile }) };
 }
 
 test('kho: tải lên/viết thẳng vào thư mục, danh sách có folders + folder từng tài liệu; thư mục lạ → 400, chưa ghi tệp', async (t) => {

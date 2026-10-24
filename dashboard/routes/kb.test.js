@@ -55,7 +55,7 @@ test('kho tri thức gọn: viết tài liệu, sửa/đổi tên; đổi nguồ
   mkdirSync(join(root, 'Doan truong'), { recursive: true });
   const envFile = join(deps.dir, 'hermes.env');
   writeFileSync(envFile, '');
-  deps.kb = createKbStore({ kbDir: () => root, publicDirs: () => '', envFile });
+  deps.kb = createKbStore({ kbDir: () => root, allowedRoots: () => join(deps.dir, 'kho-khac'), envFile });
   const { call } = await startApp(t, deps);
   const owner = await loginAs(t, deps, call, { username: 'khach', role: 'owner' });
   const made = await call('/api/kb/note', { method: 'POST', cookie: owner, body: { title: 'Lịch trực', text: 'Thứ Hai: Lan' } });
@@ -69,9 +69,11 @@ test('kho tri thức gọn: viết tài liệu, sửa/đổi tên; đổi nguồ
   assert.equal((await call('/api/admin/kb/source', { method: 'PUT', cookie: owner, body: { dir: root } })).status, 403);
   const admin = await loginAs(t, deps, call);
   assert.deepEqual((await call(`/api/admin/kb/source?dir=${encodeURIComponent(root)}`, { cookie: admin })).json.subdirs, ['Doan truong']);
-  const put = await call('/api/admin/kb/source', { method: 'PUT', cookie: admin, body: { dir: root, publicDirs: ['Doan truong'] } });
+  const other = join(deps.dir, 'kho-khac');
+  mkdirSync(other);
+  const put = await call('/api/admin/kb/source', { method: 'PUT', cookie: admin, body: { dir: other, allDirs: true } });
   assert.equal(put.status, 200);
-  assert.match(readFileSync(envFile, 'utf8'), /ZALO_KB_PUBLIC_DIRS="Doan truong"/);
+  assert.match(readFileSync(envFile, 'utf8'), /ZALO_KB_DIR=/);
   assert.ok(deps.restartFlags.get().assistant, 'cần khởi động lại trợ lý');
   assert.ok(deps.activity.list().some((e) => e.action === 'kb_source'));
 });

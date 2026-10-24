@@ -1,6 +1,6 @@
 /**
  * Kho tri thức (spec §18.5): thư mục `ZALO_KB_DIR` mà bot tra bằng `zalo_kb_list`/`zalo_kb_read`. Dashboard liệt kê
- * đúng những tệp bot được đọc (cùng luật lọc với plugin `tools.py`: phạm vi `ZALO_KB_PUBLIC_DIRS`, bỏ thư mục ẩn,
+ * đúng những tệp bot được đọc (cùng luật lọc với plugin `tools.py`: bỏ thư mục ẩn,
  * thư mục mã nguồn, tên gợi ý dữ liệu riêng), tải tệp mới vào MỘT thư mục riêng `tai-len-dashboard`, và chỉ xoá
  * được tệp trong thư mục đó — phần còn lại của kho là tài liệu của chủ bot, dashboard không đụng.
  */
@@ -36,14 +36,10 @@ const MAX_COUNT = 100_000;
 const err = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const NOT_ALLOWED = 'Chỉ xoá được tệp đã tải lên từ dashboard — tài liệu khác trong kho hãy xoá trên máy.';
 
-export function parsePublicDirs(raw) {
-  return String(raw ?? '').split(',').map((s) => s.trim().replace(/^\/+|\/+$/g, '').toLowerCase()).filter(Boolean);
-}
 
 /** Như `_kb_allowed` của plugin: đường tương đối dạng a/b/c.pdf này bot có được thấy không. */
-export function kbAllowed(rel, publicDirs) {
+export function kbAllowed(rel) {
   const parts = rel.split('/');
-  if (publicDirs.length && (parts.length < 2 || !publicDirs.includes(parts[0].trim().toLowerCase()))) return false;
   if (parts.some((p) => p.startsWith('.') || SKIP_DIRS.has(p.toLowerCase()))) return false;
   const low = rel.toLowerCase();
   return !SKIP_PATTERNS.some((p) => low.includes(p));
@@ -121,12 +117,12 @@ function subdirsOf(dir) {
 }
 
 /**
- * `kbDir`, `publicDirs`, `allowedRoots`: đọc lại mỗi lần (người cài đặt có thể đổi .env). `envFile`: .env của Hermes.
+ * `kbDir`, `allowedRoots`: đọc lại mỗi lần (người cài đặt có thể đổi .env). `envFile`: .env của Hermes.
  * Đổi nguồn từ dashboard CHỈ chọn trong thư mục con của kho hiện tại, hoặc chuyển sang một gốc trong `allowedRoots`
  * — không bao giờ nhận đường dẫn tự do: bot đọc được kho bằng công cụ công khai, nên một phiên Quản trị bị chiếm
  * không được biến thư mục khoá/phiên đăng nhập thành kho.
  */
-export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envFile = null, foldersFile = null, now = Date.now, walkBudgetMs = WALK_BUDGET_MS }) {
+export function createKbStore({ kbDir, allowedRoots = () => '', envFile = null, foldersFile = null, now = Date.now, walkBudgetMs = WALK_BUDGET_MS }) {
   let cache = null;
   // Thư mục của tài liệu tự tạo: chỉ là siêu dữ liệu (kb-folders.js), tệp vẫn nằm phẳng trong thư mục tải lên.
   const folders = createKbFolders({ file: foldersFile });
@@ -135,11 +131,7 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
     if (!raw) return null;
     try { const r = realpathSync(resolve(raw)); return statSync(r).isDirectory() ? r : null; } catch { return null; }
   }
-  function uploadDir(r, scope) {
-    if (!scope.length) return join(r, UPLOAD_DIR);
-    const first = readdirSync(r, { withFileTypes: true }).find((d) => d.isDirectory() && d.name.trim().toLowerCase() === scope[0]);
-    return join(r, first ? first.name : scope[0], UPLOAD_DIR);
-  }
+  function uploadDir(r) { return join(r, UPLOAD_DIR); }
   const relOf = (r, p) => relative(r, p).split(sep).join('/');
   /** Thư mục tải lên phải là thư mục thật nằm trong kho — không phải liên kết trỏ ra ngoài. */
   function assertRealInside(r, dir) {
@@ -159,13 +151,13 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
     if (real !== r && (relative(r, real).startsWith('..') || real !== resolve(parent))) throw err(403, 'Thư mục tải lên không nằm trong kho — báo người cài đặt kiểm tra.');
   }
   /** Tên tệp mới trong thư mục tự tạo phải qua được luật lọc của bot — nếu không, bot không đọc mà trang cũng không hiện. */
-  function assertReadable(r, scope, dir, name) {
-    if (!kbAllowed(relOf(r, join(dir, name)), scope)) {
+  function assertReadable(dir, name) {
+    if (!kbAllowed(relOf(root(), join(dir, name)))) {
       throw err(400, `Tên có từ bot bỏ qua để bảo vệ dữ liệu riêng (${SKIP_PATTERNS.slice(0, 6).join(', ')}…) — đổi tên khác.`);
     }
   }
   /** Duyệt kho: giữ tối đa 3000 tệp mới nhất để tìm; ĐẾM tiếp tới 100.000 tệp theo thư mục cấp 1. */
-  async function walk(r, scope, uploadRel) {
+  async function walk(r, uploadRel) {
     const files = [];
     const counts = new Map();
     let seen = 0;
@@ -184,7 +176,7 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
           if (!d.name.startsWith('.') && !SKIP_DIRS.has(d.name.toLowerCase()) && rel.split('/').length < 8 && rel !== uploadRel) stack.push(rel);
           continue;
         }
-        if (!d.isFile() || !READABLE.has(extname(d.name).toLowerCase()) || !kbAllowed(rel, scope)) continue;
+        if (!d.isFile() || !READABLE.has(extname(d.name).toLowerCase()) || !kbAllowed(rel)) continue;
         seen += 1;
         const top = rel.includes('/') ? rel.split('/')[0] : '';
         const c = counts.get(top.toLowerCase()) || { name: top, files: 0, links: 0 };
@@ -229,24 +221,22 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
   function ownTarget(rel) {
     const r = root();
     if (!r) throw err(409, 'Chưa cấu hình kho tri thức (ZALO_KB_DIR) — báo người cài đặt.');
-    const scope = parsePublicDirs(publicDirs());
-    const dir = uploadDir(r, scope);
+    const dir = uploadDir(r);
     const target = resolve(r, String(rel ?? ''));
     const inside = relative(dir, target);
     if (!inside || inside.startsWith('..') || inside.includes(sep) || resolve(dir, inside) !== target) throw err(403, NOT_ALLOWED);
     if (!assertRealInside(r, dir)) throw err(404, 'Tệp không còn — tải lại trang.');
     let st; try { st = lstatSync(target); } catch { throw err(404, 'Tệp không còn — tải lại trang.'); }
     if (!st.isFile()) throw err(403, NOT_ALLOWED);
-    return { r, scope, dir, target };
+    return { r, dir, target };
   }
   function upload(rawName, buf, { folder = null } = {}) {
     const r = root();
     if (!r) throw err(409, 'Chưa cấu hình kho tri thức (ZALO_KB_DIR) — báo người cài đặt.');
     const name = safeFileName(rawName);
     checkContent(name, buf);
-    const scope = parsePublicDirs(publicDirs());
-    const dir = uploadDir(r, scope);
-    assertReadable(r, scope, dir, name);
+    const dir = uploadDir(r);
+    assertReadable(dir, name);
     folders.check(folder);
     // Kiểm TRƯỚC khi tạo thư mục: thư mục cha là liên kết trỏ ra ngoài kho thì mkdir sẽ tạo ngoài kho.
     assertParentInside(r, dir);
@@ -265,22 +255,18 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
   return {
     info() {
       const r = root();
-      const scope = parsePublicDirs(publicDirs());
-      return { configured: Boolean(r), publicDirs: scope, uploadDir: r ? relOf(r, uploadDir(r, scope)) : null };
+      return { configured: Boolean(r), publicDirs: [], uploadDir: r ? relOf(r, uploadDir(r)) : null };
     },
     async list({ fresh = false } = {}) {
       const r = root();
       if (!r) return { files: [], truncated: false, sources: [], own: [] };
-      const scope = parsePublicDirs(publicDirs());
-      const key = `${r}|${scope.join(',')}`;
+      const key = String(r);
       if (fresh || !cache || cache.key !== key || now() - cache.at > LIST_TTL_MS) {
-        const dir = uploadDir(r, scope);
-        const onDisk = subdirsOf(r);
-        const named = scope.map((n) => onDisk.find((d) => d.trim().toLowerCase() === n) || n);
-        const walked = await walk(r, scope, relOf(r, dir));
-        cache = { key, at: now(), files: walked.files, truncated: walked.capped, sources: summarize(walked.counts, named), own: await ownFiles(r, dir) };
+        const dir = uploadDir(r);
+        const walked = await walk(r, relOf(r, dir));
+        cache = { key, at: now(), files: walked.files, truncated: walked.capped, sources: summarize(walked.counts), own: await ownFiles(r, dir) };
       }
-      const meta = folders.view(cache.own.map((f) => f.path), relOf(r, uploadDir(r, scope)));
+      const meta = folders.view(cache.own.map((f) => f.path), relOf(r, uploadDir(r)));
       return { files: cache.files, truncated: cache.truncated, sources: cache.sources, own: cache.own.map((f) => ({ ...f, folder: meta.folderOf(f.path) })), folders: meta.folders };
     },
     upload,
@@ -323,7 +309,7 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
     },
     /** Đổi tên (giữ đuôi) và/hoặc lưu nội dung chữ mới. Kiểm hết rồi mới ghi. Trả đường dẫn mới. */
     saveOwn(rel, { name, text } = {}) {
-      const { r, scope, dir, target } = ownTarget(rel);
+      const { r, dir, target } = ownTarget(rel);
       const ext = extname(target);
       let buf = null;
       if (text !== undefined) {
@@ -337,7 +323,7 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
       if (wanted && wanted !== basename(target, ext)) {
         const next = safeFileName(`${wanted}${ext}`);
         final = join(dir, next);
-        assertReadable(r, scope, dir, next);
+        assertReadable(dir, next);
         // Chỉ đổi hoa/thường (Windows không phân biệt) thì không phải trùng tên.
         if (!sameDir(final, target) && existsSync(final)) throw err(409, 'Đã có tài liệu trùng tên — chọn tên khác.');
       }
@@ -362,12 +348,11 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
       if (buf.length > MAX_TEXT_BYTES) throw err(413, 'Nội dung quá 1 MB — chia thành nhiều tài liệu.');
       return upload(`${name}.md`, buf, opts);
     },
-    /** Nguồn hiện tại cho cửa sổ "Sửa nguồn" (chỉ Quản trị): gốc đang dùng, các gốc được phép, thư mục mở (đúng thứ tự). */
+    /** Nguồn hiện tại cho cửa sổ "Sửa nguồn" (chỉ Quản trị): gốc đang dùng + các gốc được phép. Bot luôn đọc cả kho. */
     source() {
       const r = root();
       const subs = r ? subdirsOf(r) : [];
-      const open = parsePublicDirs(publicDirs()).map((n) => subs.find((d) => d.trim().toLowerCase() === n)).filter(Boolean);
-      return { dir: String(kbDir() || '').trim(), exists: Boolean(r), roots: choices().map((c) => c.label), publicDirs: open, subdirs: subs };
+      return { dir: String(kbDir() || '').trim(), exists: Boolean(r), roots: choices().map((c) => c.label), publicDirs: [], subdirs: subs };
     },
     /** Thư mục con của một gốc được phép (để chọn). */
     browse(dir) {
@@ -375,32 +360,26 @@ export function createKbStore({ kbDir, publicDirs, allowedRoots = () => '', envF
       return { dir: label, subdirs: subdirsOf(real) };
     },
     /**
-     * Ghi nguồn vào .env của Hermes (có .bak): gốc (một trong các gốc được phép) + thư mục mở, giữ thứ tự (thư mục
-     * đầu chứa tài liệu tự tạo). Danh sách rỗng = bot đọc cả kho → phải xác nhận `allDirs`. Trả `changed`.
+     * Ghi nguồn vào .env của Hermes (có .bak): gốc phải là một trong các gốc được phép, xác nhận `allDirs` = bot đọc
+     * cả kho. ZALO_KB_PUBLIC_DIRS đã ngừng dùng — xoá key khỏi .env khi đổi nguồn. Trả `changed`.
      */
-    setSource({ dir, publicDirs: chosen = [], allDirs = false }) {
+    setSource({ dir, allDirs = false }) {
       if (!envFile) throw err(409, 'Bản cài này chưa cho đổi nguồn từ dashboard — báo người cài đặt.');
+      if (allDirs !== true) throw err(400, 'Chưa xác nhận cho bot đọc cả kho.');
       const { label, real } = pickRoot(dir);
-      const subs = new Set(subdirsOf(real));
-      const picked = [...new Set((Array.isArray(chosen) ? chosen : []).map((x) => String(x)))];
-      if (!picked.length && allDirs !== true) throw err(400, 'Chưa chọn thư mục nào — chọn thư mục bot được đọc, hoặc xác nhận cho bot đọc cả kho.');
-      if (picked.length > 20) throw err(400, 'Chọn tối đa 20 thư mục.');
-      const missing = picked.find((x) => !subs.has(x));
-      if (missing) throw err(400, `Không thấy thư mục "${missing}" trong nguồn — chọn lại.`);
-      if (picked.some((x) => x.includes(','))) throw err(400, 'Tên thư mục có dấu phẩy không dùng được — đổi tên thư mục.');
-      const before = { dir: String(kbDir() || '').trim(), open: parsePublicDirs(publicDirs()).join(',') };
+      const before = String(kbDir() || '').trim();
       const value = label.includes('\\') ? real.split(sep).join('/') : label;
-      const changed = !sameDir(realDir(before.dir) || before.dir, real) || before.open !== parsePublicDirs(picked.join(',')).join(',');
+      const changed = !sameDir(realDir(before) || before, real);
       if (changed) {
         try {
-          writeEnvKeys(envFile, { ZALO_KB_DIR: value, ZALO_KB_PUBLIC_DIRS: picked.join(',') });
+          writeEnvKeys(envFile, { ZALO_KB_DIR: value, ZALO_KB_PUBLIC_DIRS: '' });
         } catch (e) {
           if (/có ký tự không cho phép/.test(e.message)) throw err(400, 'Tên thư mục có ký tự đặc biệt (nháy, #, \\, …) — đổi tên thư mục rồi chọn lại.');
           throw e;
         }
         cache = null;
       }
-      return { dir: value, publicDirs: picked, changed };
+      return { dir: value, publicDirs: [], changed };
     },
   };
 }

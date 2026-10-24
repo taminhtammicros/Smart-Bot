@@ -2,6 +2,42 @@
 
 Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
+## [Chưa phát hành]
+
+### Sửa — bot không tìm thấy tài liệu vừa tải lên dashboard khi hỏi bằng tiếng Việt có dấu
+
+- Triệu chứng: tải `TOÁN 7-BỘ 10 ĐỀ ÔN TẬP GIỮA KÌ 1-26-27-CÓ ĐA.docx` lên Kho tri thức rồi hỏi *"em có tri thức
+  toán lớp 7 không?"* → bot trả lời bằng kiến thức chung, không đọc tệp. Nguyên nhân: macOS ghi tên tệp ở dạng
+  **NFD** (`A` + dấu sắc rời) còn câu hỏi là **NFC**, nên `zalo_kb_list(query="toán")` so chuỗi thô và trả **rỗng**.
+  Nay chuẩn hoá cả hai về NFC trước khi so (`_kb_fold`).
+- Cùng chỗ: `query` nhiều từ trước đây phải khớp **nguyên cụm liền mạch** trong tên tệp — `"toán lớp 7"` không bao
+  giờ khớp `"TOÁN 7-BỘ 10 ĐỀ…"`. Nay khớp **theo từng từ**, và token phải trọn một từ (`"toán 6"` không khớp nhờ mẩu
+  `6` trong `26`).
+- Thêm đường lùi: lọc theo tên không ra tệp nào thì tìm tiếp trong **nội dung** (docx/pdf qua bộ trích sẵn có, văn
+  bản thuần đọc thẳng), trả tệp kèm `snippet` quanh từ khoá và ghi rõ `matched: "content"`. Từ khoá phải nằm gần nhau
+  trong 200 ký tự, nên `"toán 8"` vẫn không trả về tài liệu lớp 7. Nội dung trích được đệm theo `mtime`+`size`, tệp
+  trên 20 MB bị bỏ qua, tối đa 40 tệp mỗi lượt tra — một câu hỏi không thể treo vì quét cả kho.
+- Kèm mô tả `zalo_kb_list.query` nói rõ luật khớp để model truyền từ khoá đúng.
+
+### Sửa — "Sửa lịch hẹn" báo lỗi chung thay vì lý do thật; không đặt lại được việc một lần đã chạy xong
+
+- Triệu chứng: bấm **Lưu** khi sửa lịch hẹn (nhất là đổi ngày giờ của việc "Một lần") → báo
+  *"Trợ lý chưa làm được việc này — tải lại trang…"* và lịch không đổi, dù Hermes đã nói rõ lý do. Nguyên nhân: bản
+  `hermes` này **thoát mã khác 0** khi từ chối và in dòng `Failed to … job: <lý do>` ra **stdout**; dashboard chỉ đọc
+  dòng đó khi lệnh thoát 0, nên mọi lời từ chối (giờ đã qua, cron sai, việc đã chạy xong…) đều bị báo thành lỗi nội
+  bộ 502. Nay đọc lý do ở **cả hai đường**, trả 400 kèm câu sửa được ("Thời điểm này đã qua…", "Lịch chạy không hợp
+  lệ…", "Việc một lần này đã chạy xong…"); chỉ lỗi thật (hết giờ, không chạy được `hermes`) mới là 502.
+- Cùng nguyên nhân gốc: `defaultExec` nuốt `stdout` khi lệnh lỗi — nay giữ lại cả `stdout` lẫn `stderr`.
+- Việc "Một lần" **đã chạy xong** (Hermes coi là việc kết thúc) giờ đặt lại được: hộp sửa hiện nhãn *"Đã chạy xong"*
+  và nút *"Lưu & chạy lại"*, gửi `cron resume <id> --at <giờ mới>` (đường Hermes chỉ) thay vì `edit --schedule` mà
+  Hermes từ chối. Đổi việc đã chạy xong sang lặp lại → 400 nói rõ thay vì im lặng thất bại. Nút Tạm dừng/Chạy lại ẩn
+  với việc đã kết thúc (thao tác đó vốn không hợp lệ).
+
+**Đo:** `dashboard/lib/schedules.test.js` 10/10 (thêm: thoát khác 0 đọc lý do → 400; việc terminal đặt lại giờ bằng
+`resume --at`; lỗi lạ vẫn 502); `dashboard/routes/schedules.test.js`, `dashboard/public/public.test.js` xanh. Smoke
+trên Hermes thật: tạo việc một lần → đánh dấu đã chạy xong → sửa qua thư viện dashboard: tên đổi + `resume --at`
+chạy đúng, lịch mới hiện trong tuần; đặt ngày đã qua → 400 "Thời điểm này đã qua" (trước là 502).
+
 ## [2.54.0] — 2026-10-22
 
 ### Mới — Mỗi nhóm chát một model riêng (Phân quyền Bot)
@@ -912,6 +948,9 @@ Thời tiết và tỷ giá đi theo công tắc "Tra cứu web"; từ điển v
   Trang hiện từng bước và nhật ký, tự nối lại khi dashboard khởi động lại. Trên Linux trình cập nhật chạy bằng `systemd-run` nên không bị tắt theo dashboard.
 - **Thanh trạng thái báo "Có bản mới vX"** cho mọi người đăng nhập (Quản trị bấm vào là tới Bảo trì; Chủ bot thấy lời nhắc báo người quản trị); hiện "Đang cập nhật bot…" khi đang cập nhật.
 - `scripts/self-update.js` (chạy tay được: `node scripts/self-update.js --to vX.Y.Z`).
+
+### Đổi
+- **Ủng hộ tác giả**: số tài khoản MB Bank đổi từ `0328186264` sang `0988328338` (LUONG HAI ANH) — dashboard, README, ảnh QR.
 
 ## [2.8.3] — 2026-10-10
 

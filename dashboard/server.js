@@ -132,7 +132,7 @@ export function buildDeps({ env = process.env, sidecarRoot = join(here, '..'), i
     memoryTags: createMemoryTags({ hermesHome: paths.hermesHome, agentMemory }),
     schedules: createSchedules({ hermesHome: paths.hermesHome, bin: hermesBin({ hermesHome: paths.hermesHome, env }) }),
     // Đọc lại .env mỗi lần: người cài đặt đổi ZALO_KB_DIR thì không cần khởi động lại dashboard.
-    kb: createKbStore({ kbDir: () => readEnvKey(paths.hermesEnvFile, 'ZALO_KB_DIR'), publicDirs: () => readEnvKey(paths.hermesEnvFile, 'ZALO_KB_PUBLIC_DIRS'),
+    kb: createKbStore({ kbDir: () => readEnvKey(paths.hermesEnvFile, 'ZALO_KB_DIR'),
       allowedRoots: () => readEnvKey(paths.hermesEnvFile, 'ZALO_KB_ALLOWED_ROOTS'), envFile: paths.hermesEnvFile,
       foldersFile: join(paths.hermesHome, 'zalo', 'kb-folders.json') }),
     insightAi: createInsightAi({ dir: paths.insightDir }),

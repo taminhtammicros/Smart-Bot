@@ -906,12 +906,12 @@ Dashboard quản trị cũng có nút **Cộng đồng 2Anh** trên thanh trạn
 Nếu bot này hay và hữu ích với anh chị, một ly cà phê ủng hộ sẽ giúp 2Anh AI có thêm động lực phát triển tiếp. Cảm ơn anh chị rất nhiều!
 
 <p align="center">
-  <img src="docs/images/donate-qr.jpg" width="240" alt="VietQR — MB Bank 0328186264 LUONG HAI ANH">
+  <img src="docs/images/donate-qr.jpg" width="240" alt="VietQR — MB Bank 0988328338 TA MINH TAM">
 </p>
 
 | Ngân hàng | Số tài khoản | Chủ tài khoản |
 |---|---|---|
-| MB Bank | `0328186264` | LUONG HAI ANH |
+| MB Bank | `0988328338` | TA MINH TAM |
 
 Mã QR này cũng có trong dashboard quản trị (nút **Ủng hộ tác giả** trên thanh trạng thái đầu mỗi trang).
 

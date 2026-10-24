@@ -48,19 +48,16 @@ test('Bảo trì: chỉ Quản trị; tải bản sao lưu; khôi phục đánh 
   assert.equal((await call('/api/admin/maintenance/hermes-update', { method: 'POST', cookie: admin })).json.update.running, true);
 });
 
-test('Cập nhật bot: ai đăng nhập cũng thấy có bản mới; chỉ Quản trị bấm cập nhật', async (t) => {
+test('Cập nhật bot: chỉ Quản trị bấm cập nhật', async (t) => {
   const deps = makeDeps(t);
   fakes(deps);
   let asked = '';
   Object.assign(deps.maintenance, {
-    botNotice: async () => ({ current: '2.8.3', latest: 'v2.9.0', newer: true, updating: false }),
     botUpdateState: () => ({ running: false }),
     updateBot: async (to) => { asked = to; return { running: true, from: '2.8.3', to }; },
   });
   const { call } = await startApp(t, deps);
-  assert.equal((await call('/api/update-notice')).status, 401);
   const owner = await loginAs(t, deps, call, { username: 'khach', role: 'owner' });
-  assert.equal((await call('/api/update-notice', { cookie: owner })).json.latest, 'v2.9.0');
   assert.equal((await call('/api/admin/maintenance/bot-update', { method: 'POST', cookie: owner, body: { to: 'v2.9.0' } })).status, 403);
   const admin = await loginAs(t, deps, call);
   const r = await call('/api/admin/maintenance/bot-update', { method: 'POST', cookie: admin, body: { to: 'v2.9.0' } });

@@ -1,3 +1,4 @@
+import { decodeAES } from './node_modules/zca-js/dist/utils.js';
 /**
  * Bạn bè, lời mời kết bạn và lời nhắc Zalo cho dashboard (spec §18.4). Dashboard không bao giờ chạm Zalo trực
  * tiếp — mọi lời gọi đi qua /control/* (control-api.js) rồi tới đây. Đọc thì gọi thẳng zca-js (danh sách bạn
@@ -93,12 +94,24 @@ export function createZaloDirectory({ getApi, acquire = async () => {}, audit = 
   const boardCache = new Map();  // groupId → { at, value }
   const fresh = (hit, ttl) => hit && now() - hit.at < ttl;
   let pinCache = null; // { at, list }
+  const zcaEnvCache = new WeakMap();
+  /** Truy xuất ctx + utils của phiên zca-js đang sống qua escape hatch api.custom(). */
+  async function zcaEnv(a) {
+    let hit = zcaEnvCache.get(a);
+    if (hit) return hit;
+    hit = new Promise((resolve) => {
+      let done = false;
+      a.custom('__zca_env', (env) => { if (!done) { done = true; resolve(env); } });
+      a.__zca_env({});
+    });
+    zcaEnvCache.set(a, hit);
+    return hit;
+  };
   const api = () => {
     const a = getApi();
     if (!a) throw new Error('Zalo chưa đăng nhập');
     return a;
   };
-
   return {
     async friends({ fresh = false } = {}) {
       if (!fresh && friendsCache && now() - friendsCache.at < FRIENDS_TTL_MS) return friendsCache.list;
@@ -124,7 +137,28 @@ export function createZaloDirectory({ getApi, acquire = async () => {}, audit = 
     async reminders({ threadId, threadType }) {
       checkThread(threadId, threadType);
       const a = api();
-      const raw = await a.getListReminder({ page: 1, count: MAX_REMINDERS }, String(threadId), threadType);
+      let raw;
+      try {
+        raw = await a.getListReminder({ page: 1, count: MAX_REMINDERS }, String(threadId), threadType);
+      } catch (err) {
+        console.error('[DEBUG reminders] first err name=', err?.name, 'code=', err?.code, 'msg=', JSON.stringify(err?.message));
+        if (!(err?.name === 'ZcaApiError' && err?.code === -1)) throw err;
+        const env = await zcaEnv(a);
+        const params = env.utils.encodeAES(JSON.stringify({
+          objectData: JSON.stringify({ group_id: String(threadId), board_type: 1, page: 1, count: MAX_REMINDERS, last_id: 0, last_type: 0 }),
+          imei: env.ctx.imei,
+        }));
+        const url = env.utils.makeURL(`${a.zpwServiceMap.group_board[0]}/api/board/listReminder`, { params });
+        const res = await env.utils.request(url, { method: 'GET' });
+        const j = await res.json();
+        console.error('[DEBUG reminders] fallback res ok=', res.ok, 'status=', res.status, 'j.error_code=', j?.error_code, 'j.error_message=', JSON.stringify(j?.error_message), 'data len=', j?.data?.length);
+        if (!res.ok || j.error_code != 0) throw Object.assign(new Error(j.error_message || `Lỗi ${res.status}`), { statusCode: res.status });
+        const decoded = decodeAES(env.ctx.secretKey, j.data);
+        console.error('[DEBUG reminders] decoded=', decoded?.slice(0,300));
+        if (!decoded) throw new Error('Giải mã danh sách lời nhắc thất bại');
+        raw = JSON.parse(decoded);
+        console.error('[DEBUG reminders] raw=', JSON.stringify(raw)?.slice(0,300));
+      }
       const self = typeof a.getOwnId === 'function' ? a.getOwnId() : '';
       return (Array.isArray(raw) ? raw : []).map((r) => normalizeReminder(r, self)).filter(Boolean);
     },

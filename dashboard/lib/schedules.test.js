@@ -65,14 +65,21 @@ test('đường lệnh hermes: biến môi trường → bản cài kèm → PAT
   assert.equal(hermesBin({ hermesHome: '/root/.hermes', env: {}, platform: 'linux', exists: () => false }), 'hermes');
 });
 
-test('hermes cron thoát 0 mà không làm được → 502 có bước tiếp theo; làm được thì resume/remove cũng được xác nhận', async (t) => {
+test('hermes cron không làm được → lý do thật (400) hoặc 502 khi lỗi lạ; làm được thì xác nhận trạng thái', async (t) => {
   const h = home(t);
+  // Lệnh chạy được nhưng jobs.json không đổi → lỗi bên trong, 502 kèm bước tiếp theo.
   const noop = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async () => ({ stdout: 'ok' }) });
   for (const [action, id] of [['pause', 'aa11bb22cc33'], ['resume', 'dd44ee55ff66'], ['remove', 'aa11bb22cc33']]) {
     await assert.rejects(noop.cron(action, id), (e) => e.statusCode === 502 && /thử lại/.test(e.message), `${action} không đổi trạng thái`);
   }
-  const said = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async (f, a) => { mutate(h, a[2], (j) => { j.state = 'paused'; }); return { stdout: 'Failed to pause job' }; } });
-  await assert.rejects(said.cron('pause', 'aa11bb22cc33'), (e) => e.statusCode === 502, 'chữ "Failed to" trong stdout');
+  // Hermes từ chối vì việc đã chạy xong → 400 nói rõ, không phải 502 chung (thoát mã khác 0 vẫn đọc được lý do).
+  const terminal = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async (f, a) => {
+    throw Object.assign(new Error('Command failed'), { stdout: `Failed to pause job: Cannot activate terminal cron job 'x' through update_job\n`, stderr: '' });
+  } });
+  await assert.rejects(terminal.cron('pause', 'aa11bb22cc33'), (e) => e.statusCode === 400 && /chạy xong/.test(e.message), 'lý do thật của Hermes, không phải 502');
+  // Thoát 0 mà vẫn có dòng "Failed to <động từ> job" → cũng là câu 400 theo lý do.
+  const said = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async () => ({ stdout: 'Failed to remove job: Không tìm thấy việc hẹn giờ này\n' }) });
+  await assert.rejects(said.cron('remove', 'aa11bb22cc33'), (e) => e.statusCode === 400 && /không nhận lịch này/i.test(e.message), 'lý do trong stdout');
   const real = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async (f, [, action, id]) => {
     mutate(h, id, (j) => { if (action === 'resume') { j.state = 'scheduled'; delete j.paused_at; } else if (action === 'remove') return 'remove'; });
     return { stdout: 'done' };
@@ -167,6 +174,53 @@ test('Hermes từ chối → 400 kèm lý do (không 502); lệnh lỗi mà vi�
   const flaky = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async (f, a) => { await inner(f, a); throw new Error('timeout'); } });
   const made = await flaky.create(parseJobInput({ name: 'Tin sáng mới', prompt: 'x', target: '555', spec: { repeat: 'daily', times: ['06:30'] } }));
   assert.equal(made.name, 'Tin sáng mới');
+});
+
+test('Hermes thoát khác 0 (lịch đã qua): đọc lý do trên stdout → 400 dễ hiểu, không phải 502', async (t) => {
+  const { parseJobInput } = await import('./schedules.js');
+  const h = home(t);
+  // `hermes cron` của bản này thoát 1 khi từ chối và in "Failed to … job: <lý do>" ra stdout.
+  const refused = (verb, why) => async (file, args) => {
+    throw Object.assign(new Error(`Command failed: hermes cron ${verb}`), { stdout: `Failed to ${verb} job: ${why}\n`, stderr: 'cảnh báo cũ\n' });
+  };
+  const past = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: refused('create', 'Requested one-shot time 2020-01-01T09:00:00+07:00 is more than 120s in the past') });
+  await assert.rejects(past.create(parseJobInput({ name: 'Trễ', prompt: 'x', target: '555', spec: { repeat: 'daily', times: ['08:00'] } })),
+    (e) => e.statusCode === 400 && /đã qua/.test(e.message), 'lịch đã qua phải là 400 kèm lý do, không phải 502');
+  const badCron = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: refused('update', "Invalid cron expression '0 25 * * *': out of range") });
+  await assert.rejects(badCron.update('aa11bb22cc33', parseJobInput({ spec: { repeat: 'daily', times: ['08:00'] } }, { partial: true })),
+    (e) => e.statusCode === 400 && /không hợp lệ/.test(e.message));
+  // Lỗi thật (không có dòng từ chối) vẫn là 502.
+  const crash = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async () => { throw Object.assign(new Error('spawn ENOENT'), { stdout: '', stderr: '' }); } });
+  await assert.rejects(crash.update('aa11bb22cc33', parseJobInput({ name: 'Mới' }, { partial: true })), (e) => e.statusCode === 502);
+});
+
+test('việc một lần đã chạy xong: đặt lại giờ bằng `resume --at`, không dùng `edit --schedule`', async (t) => {
+  const { parseJobInput } = await import('./schedules.js');
+  const h = home(t, { jobs: [{ id: 'bb11cc22dd33', name: 'Nhắc một lần', prompt: 'Nhắc nộp bài', deliver: 'zalo:555',
+    schedule: { kind: 'once', run_at: '2026-10-20T08:00:00+07:00', display: 'once at 2026-10-20 08:00' },
+    state: 'completed', enabled: false, repeat: { times: 1, completed: 1 } }] });
+  assert.equal(createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: fakeHermes(h, []) }).list()[0].terminal, true, 'nhãn terminal cho việc đã chạy xong');
+  const calls = [];
+  const s = createSchedules({ hermesHome: h, bin: 'hermes', env: {}, execImpl: async (file, args) => {
+    calls.push(args);
+    const f = join(h, 'cron', 'jobs.json');
+    const data = JSON.parse(readFileSync(f, 'utf8'));
+    const j = data.jobs[0];
+    if (args[1] === 'resume') { j.schedule = { kind: 'once', run_at: `${args[3].slice(5)}:00+07:00`, display: 'once' }; j.state = 'scheduled'; j.enabled = true; j.repeat.completed = 0; }
+    else { for (const a of args.slice(3)) { const k = a.slice(2).split('=')[0]; const v = a.slice(k.length + 3); if (k === 'name') j.name = v; } }
+    writeFileSync(f, JSON.stringify(data));
+    return { stdout: 'ok' };
+  } });
+  const view = await s.update('bb11cc22dd33', parseJobInput({ name: 'Nhắc một lần mới', spec: { repeat: 'once', date: '2026-10-24', times: ['09:00'] } }, { partial: true }));
+  assert.deepEqual(calls, [['cron', 'edit', 'bb11cc22dd33', '--name=Nhắc một lần mới'], ['cron', 'resume', 'bb11cc22dd33', '--at=2026-10-24T09:00']], 'sửa tên rồi mở lại giờ bằng resume --at');
+  assert.equal(view.name, 'Nhắc một lần mới');
+  assert.equal(view.spec.times[0], '09:00');
+  // Đổi việc một lần đã chạy xong sang lặp lại → 400 nói rõ (Hermes không cho mở lại một việc terminal thành lặp).
+  const h2 = home(t, { jobs: [{ id: 'cc11dd22ee33', name: 'Một lần', prompt: 'x', deliver: 'zalo:555',
+    schedule: { kind: 'once', run_at: '2026-10-20T08:00:00+07:00' }, state: 'completed', enabled: false, repeat: { times: 1, completed: 1 } }] });
+  const s2 = createSchedules({ hermesHome: h2, bin: 'hermes', env: {}, execImpl: fakeHermes(h2, []) });
+  await assert.rejects(s2.update('cc11dd22ee33', parseJobInput({ spec: { repeat: 'daily', times: ['08:00'] } }, { partial: true })),
+    (e) => e.statusCode === 400 && /đã chạy xong/.test(e.message));
 });
 
 test('nơi gửi: đọc mọi đích Zalo (kể cả "origin"), dựng lại deliver giữ đích không phải Zalo; tối đa 10', async () => {

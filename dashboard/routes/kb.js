@@ -73,10 +73,10 @@ export function kbRoutes({ kb, activity, restartFlags }) {
 
   r.put('/admin/kb/source', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const saved = kb.setSource({ dir: req.body?.dir, publicDirs: req.body?.publicDirs, allDirs: req.body?.allDirs === true });
+      const saved = kb.setSource({ dir: req.body?.dir, allDirs: req.body?.allDirs === true });
       if (saved.changed) {
         restartFlags?.mark('assistant', 'Kho tri thức: nguồn');
-        log(req, 'kb_source', `${saved.dir} — ${saved.publicDirs.length ? saved.publicDirs.join(', ') : 'cả kho'}`);
+        log(req, 'kb_source', `${saved.dir} — cả kho`);
       }
       res.json({ ok: true, ...saved });
     } catch (err) { fail(res, err, 'Chưa đổi được nguồn — thử lại.'); }

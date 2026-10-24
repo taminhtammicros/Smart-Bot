@@ -1870,6 +1870,36 @@ def _kb_public_dirs() -> tuple:
     return tuple(part.strip().strip("/").lower() for part in str(raw or "").split(",") if part.strip())
 
 
+def _kb_fold(text: str) -> str:
+    """Chuẩn hoá để so tên tệp với ``query``: NFC + chữ thường.
+
+    Tên tệp trên đĩa có thể ở dạng tổ hợp (NFD — macOS tạo ra khi tải từ
+    dashboard) còn ``query`` do mô hình gõ thường ở dạng dựng sẵn (NFC). So
+    thẳng hai dạng thì "toán" KHÔNG khớp "TOA\\u0301N": kho có tệp mà
+    ``zalo_kb_list(query="toán")`` trả rỗng, agent kết luận kho trống. Chuẩn
+    hoá cả hai về NFC thì mọi câu hỏi có dấu đều khớp.
+    """
+    return unicodedata.normalize("NFC", str(text or "")).lower()
+
+_KB_QUERY_SPLIT = re.compile(r"[\s/\-_.(),;:]+")
+
+def _kb_match(query: str, rel: str) -> bool:
+    """Tên tệp này có khớp ``query`` không.
+
+    Khớp theo TỪNG TỪ (tất cả phải có mặt), không phải nguyên cụm. Người hỏi
+    gõ "toán lớp 7" trong khi tệp tên "TOÁN 7-BỘ 10 ĐỀ…": so chuỗi con liền
+    mạch thì trượt sạch, agent tưởng kho rỗng rồi trả lời bằng kiến thức
+    chung. Tách cả hai phía theo dấu cách/gạch nối thì "toán" và "7" đều có.
+
+    Token phải khớp TRỌN một từ, không phải mẩu của từ khác: tên có
+    "1-26-27" mà tìm "6" thì không được khớp (mẩu của "26") — nếu không,
+    "toán 6" trả về tài liệu lớp 7.
+    """
+    if not query:
+        return True
+    words = {word for word in _KB_QUERY_SPLIT.split(_kb_fold(rel)) if word}
+    return all(token in words for token in _KB_QUERY_SPLIT.split(_kb_fold(query)) if token)
+
 def _kb_allowed(rel_posix: str) -> bool:
     """Đường dẫn tương đối này có nên lộ ra cho người hỏi không."""
     parts = rel_posix.split("/")
@@ -1957,8 +1987,102 @@ def _kb_listing(root, query: str):
 
     files = _KB_CACHE["files"]
     if query:
-        files = [f for f in files if query in str(f.get("path", "")).lower()]
+        files = [f for f in files if _kb_match(query, f.get("path", ""))]
     return files, _KB_CACHE["skipped"], fresh
+
+# Trần số tệp quét nội dung mỗi lượt tra: mỗi tệp là một lần trích văn bản
+# (docx/pdf tốn hàng chục ms), quét cả kho nghìn tệp sẽ treo lượt trả lời.
+_KB_CONTENT_SCAN_MAX = 40
+# Chỉ quét lại nội dung tệp chưa đổi — trích docx/pdf đắt, đệm theo mtime+size.
+_KB_TEXT_CACHE: Dict[str, tuple] = {}
+
+def _kb_text_of(path: str, st) -> str:
+    """Văn bản của một tệp để tìm từ khoá, đệm theo (mtime, size)."""
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _KB_TEXT_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    suffix = os.path.splitext(path)[1].lower()
+    text = ""
+    try:
+        if suffix in KB_DOC_SUFFIXES:
+            text = _kb_extract(path) or ""
+        elif suffix in KB_TEXT_SUFFIXES:
+            with open(path, "rb") as fh:
+                text = fh.read(256_000).decode("utf-8", errors="replace")
+        # .url chỉ là ba dòng INI, không mang nội dung tài liệu — bỏ qua.
+    except OSError:
+        text = ""
+    text = _kb_fold(text)
+    if len(_KB_TEXT_CACHE) > 256:
+        _KB_TEXT_CACHE.clear()
+    _KB_TEXT_CACHE[path] = (key, text)
+    return text
+
+def _kb_search_content(root, files, query: str) -> List[Dict[str, Any]]:
+    """Tìm ``query`` trong NỘI DUNG tệp, trả tệp kèm dòng khớp đầu tiên.
+
+    Lọc theo tên tệp là chưa đủ: tài liệu thật thường đặt tên viết tắt
+    ("TOÁN 7-BỘ 10 ĐỀ…") còn người hỏi gõ đúng cụm trong bài ("toán lớp 7").
+    Khi lọc tên không ra gì mà vẫn trả danh sách rỗng thì agent kết luận kho
+    trống và trả lời bằng kiến thức chung — đúng lỗi người dùng báo.
+    """
+    tokens = [tok for tok in _KB_QUERY_SPLIT.split(_kb_fold(query)) if tok]
+    if not tokens:
+        return []
+    hits: List[Dict[str, Any]] = []
+    for item in files:
+        rel = str(item.get("path", ""))
+        full = os.path.join(str(root), rel)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        # Tệp quá lớn: trích cả PDF/docx hàng trăm MB cho một lượt tra là vô ích.
+        if st.st_size > 20 * 1024 * 1024:
+            continue
+        text = _kb_text_of(full, st)
+        if not text:
+            continue
+        # Mọi token phải có mặt VÀ nằm gần nhau trong 200 ký tự. Chỉ đòi "có
+        # mặt" thì "toán 8" khớp nhầm một đề lớp 7 (chữ "toán" ở đầu, "8" là
+        # số câu ở cuối) — trả về tài liệu sai còn tệ hơn trả rỗng.
+        window = _kb_window(text, tokens)
+        if window is None:
+            continue
+        record = dict(item)
+        record["snippet"] = window
+        record["matched"] = "content"
+        hits.append(record)
+        if len(hits) >= _KB_CONTENT_SCAN_MAX:
+            break
+    return hits
+
+def _kb_window(text: str, tokens: List[str], span: int = 200) -> Optional[str]:
+    """Đoạn văn bản chứa đủ mọi token trong ``span`` ký tự, hoặc None.
+
+    Token phải khớp TRỌN một từ (ranh giới hai đầu), không phải mẩu: tìm "8"
+    không được khớp trong "2026 - 2027" hay "18 điểm". Mốc là token dài nhất
+    (ít gặp nhất), rồi mở rộng dần tới khi đủ mặt cả cụm — đủ để "toán lớp 7"
+    khớp dòng "MÔN: TOÁN – LỚP 7", mà "toán 8" vẫn không khớp nhầm.
+    """
+    padded = f" {text} "
+    at = [m.start() for tok in tokens for m in re.finditer(rf"(?<!\w){re.escape(tok)}(?!\w)", padded) if m]
+    if not at:
+        return None
+    anchor = min(at)
+    best = None
+    step = 40
+    width = step
+    while width <= span:
+        lo = max(0, anchor - width)
+        hi = min(len(padded), anchor + width)
+        piece = padded[lo:hi]
+        if all(re.search(rf"(?<!\w){re.escape(tok)}(?!\w)", piece) for tok in tokens):
+            best = piece
+            break
+        width += step
+    return best.strip() if best else None
 
 
 async def zalo_kb_list(args: Dict[str, Any], **_kw) -> str:
@@ -1968,6 +2092,13 @@ async def zalo_kb_list(args: Dict[str, Any], **_kw) -> str:
 
     query = (args.get("query") or "").strip().lower()
     files, skipped, _ = _kb_listing(root, query)
+    if query and not files:
+        # Tên tệp không khớp nhưng nội dung có thể khớp ("toán lớp 7" nằm
+        # trong bài, tên tệp chỉ ghi "TOÁN 7-BỘ 10 ĐỀ…"). Trả rỗng ở đây là
+        # bảo agent "kho không có gì", nên phải thử nội dung trước.
+        by_content = _kb_search_content(root, _KB_CACHE["files"] or [], query)
+        if by_content:
+            files = by_content
 
     # Đệm giữ cả cây, nhưng chỉ đưa cho agent một nắm vừa phải — nhồi vài nghìn
     # đường dẫn vào ngữ cảnh vừa tốn token vừa làm nó khó chọn.
@@ -1988,6 +2119,12 @@ async def zalo_kb_list(args: Dict[str, Any], **_kw) -> str:
                            f"tham số `query` (tên thư mục hoặc tên tệp) để tìm đúng thứ cần")
     if skipped:
         payload["skipped"] = skipped
+    if query and files and files[0].get("matched") == "content":
+        # Nói rõ khớp nhờ NỘI DUNG, không phải tên: agent đang thấy `snippet`
+        # và cần biết đây là tài liệu liên quan chứ không phải trùng tên.
+        payload["matched"] = "content"
+        payload["note"] = ("không tệp nào có tên chứa đủ từ khoá — các tệp dưới đây khớp "
+                           "trong NỘI DUNG (`snippet` là đoạn quanh từ khoá); đọc bằng zalo_kb_read")
     return _ok(payload)
 
 
@@ -2025,7 +2162,7 @@ def _kb_walk(root, query: str, limit: int = 200):
                 rel = os.path.relpath(full, root_str).replace("\\", "/")
                 if not _kb_allowed(rel):
                     continue
-                if query and query not in rel.lower():
+                if query and not _kb_match(query, rel):
                     continue
                 files.append({"path": rel, "size": os.path.getsize(full)})
             except OSError:
@@ -3823,7 +3960,9 @@ TOOLS = [
         "đọc tệp phù hợp bằng zalo_kb_read. Chỉ dùng khi câu hỏi thật sự cần "
         "tra tài liệu — chuyện trò thông thường thì trả lời thẳng.",
         {"query": {"type": "string",
-                   "description": "Lọc theo tên tệp, ví dụ 'gia' hay 'huong-dan'. Để trống là liệt kê tất cả."}},
+                   "description": "Lọc theo tên tệp. Khớp theo từng từ (mọi từ phải có trong tên tệp), "
+                                  "không phân biệt hoa/thường hay dấu tổ hợp — vd. 'toán 7' khớp "
+                                  "'TOÁN 7-BỘ 10 ĐỀ…'. Để trống là liệt kê tất cả."}},
         [],
     ), zalo_kb_list, TOOLSET_PUBLIC),
 

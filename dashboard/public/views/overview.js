@@ -105,12 +105,14 @@ function openChat(c) {
  * Việc cần chú ý, mỗi việc một dòng có chỗ xử lý: `{ kind: 'danger'|'warn'|'info', text, href?, action? }`.
  * Không có gì → mảng rỗng (trang hiện "Mọi thứ ổn").
  */
-export function attentionItems({ status: s, host, requests, memory, notice, admin, now = Date.now() }) {
+export function attentionItems({ status: s, host, requests, memory, admin, now = Date.now() }) {
   const out = [];
   if (s) {
     const z = zaloCard(s);
     if (z.kind !== 'ok') out.push({ kind: z.kind === 'warn' ? 'warn' : 'danger', text: `Zalo: ${z.state}`, href: '#/zalo' });
-    if (s.sidecar !== 'down' && s.assistant && s.assistant !== 'connected') out.push({ kind: 'danger', text: 'Trợ lý AI chưa phản hồi — bot có thể không trả lời tin nhắn.', action: admin ? 'restart' : null });
+    if (s.sidecar !== 'down' && s.assistant && s.assistant !== 'connected' && (s.traffic?.lastInboundAtMs || s.traffic?.lastOutboundAtMs)) {
+      out.push({ kind: 'danger', text: 'Trợ lý AI đã rớt kết nối — bot có thể không trả lời tin nhắn.', action: admin ? 'restart' : null });
+    }
     if (s.lastError && now - Number(s.lastError.atMs || 0) < 24 * 3600_000) {
       out.push({ kind: 'warn', text: `Lỗi lúc ${fmtTime(s.lastError.atMs)}: ${errorText(s.lastError, 'owner').text}`, href: '#/audit' });
     }
@@ -131,7 +133,6 @@ export function attentionItems({ status: s, host, requests, memory, notice, admi
     const m = memory?.[t];
     if (m && m.limit && m.used / m.limit >= 0.9) out.push({ kind: 'warn', text: `${m.label} đã đầy ${Math.round((m.used / m.limit) * 100)}% — bot sắp không nhớ thêm được.`, href: '#/memory' });
   }
-  if (notice?.newer) out.push({ kind: 'info', text: `Có bản cập nhật mới ${notice.latest || ''}`.trim(), href: admin ? '#/maintenance' : '' });
   return out;
 }
 
@@ -271,8 +272,7 @@ function AiUse({ usageDays }) {
       <p class="muted small">Đếm từ khi cài bản này. "Lượt gọi AI" là mọi lần bot gọi model (kể cả khi đọc ảnh, gọi công cụ); đọc ảnh dùng model chính của bot.</p>`}
   <//>`;
 }
-
-export function Overview({ me, status: s, update = null }) {
+export function Overview({ me, status: s }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState({});
   const admin = me.role === 'admin';
@@ -280,9 +280,8 @@ export function Overview({ me, status: s, update = null }) {
   const [chats] = usePoll('/api/chats', 30_000);
   const [perms] = usePoll('/api/permissions', 120_000);
   const [sched] = usePoll('/api/schedules', 60_000);
-  const [reqs, reloadReqs] = usePoll('/api/contacts/requests', 60_000);
   const [memory] = usePoll('/api/admin/agent-memory', 300_000, admin);
-  const notice = update;
+  const [reqs, reloadReqs] = usePoll('/api/contacts/requests', 60_000);
   if (!s) return html`<${PageHead} title="Tổng quan" /><${Spinner} />`;
 
   async function restart() {
@@ -295,9 +294,9 @@ export function Overview({ me, status: s, update = null }) {
     } catch (err) { setMsg({ error: err.message }); } finally { setBusy(false); }
   }
 
-  const host = server?.host || null;
   const requests = reqs?.requests || [];
-  const items = attentionItems({ status: s, host, requests, memory, notice, admin });
+  const host = server?.host || null;
+  const items = attentionItems({ status: s, host, requests, memory, admin });
   const index = folderIndex(perms?.folders || []);
   const recent = todayChats(chats?.conversations);
   const jobs = upcomingJobs(sched?.jobs);
@@ -306,13 +305,16 @@ export function Overview({ me, status: s, update = null }) {
   const week = days.slice(-7).reduce((a, d) => a + (d.calls || 0), 0);
   const today = s.today;
   const z = zaloCard(s);
-  const assistantOk = s.sidecar !== 'down' && s.assistant === 'connected';
+  // Trợ lý: `connected` là sẵn sàng. `disconnected` chỉ là xấu khi trước đó đã từng nối (Hermes rớt);
+  // chưa từng nối là bot đang chờ Hermes mở — trạng thái bình thường sau khi khởi động, không phải lỗi.
+  const assistant = !s.sidecar || s.sidecar === 'down' ? 'down' : s.assistant === 'connected' ? 'ok' : s.traffic?.lastInboundAtMs || s.traffic?.lastOutboundAtMs ? 'warn' : 'idle';
+  const ASSISTANT_LABEL = { ok: 'sẵn sàng', warn: 'đang nối lại…', idle: 'chờ trợ lý', down: 'chưa phản hồi' };
 
   return html`
     <${PageHead} title="Tổng quan" sub="Việc cần chú ý, hội thoại hôm nay, lịch sắp chạy — cập nhật liên tục." />
     <div class="ov-strip" role="status">
       <span class=${`ov-pill is-${z.kind}`}><${Icon} name="phone" size=${14} /> Zalo: ${z.kind === 'ok' ? 'đang chạy' : z.kind === 'warn' ? 'đang nối lại' : 'mất kết nối'}</span>
-      <span class=${`ov-pill is-${assistantOk ? 'ok' : 'danger'}`}><${Icon} name="bot" size=${14} /> Trợ lý: ${assistantOk ? 'sẵn sàng' : 'chưa phản hồi'}</span>
+      <span class=${`ov-pill is-${assistant === 'ok' ? 'ok' : assistant === 'down' ? 'danger' : 'idle'}`}><${Icon} name="bot" size=${14} /> Trợ lý: ${ASSISTANT_LABEL[assistant]}</span>
       <span class="ov-pill"><${Icon} name="chat" size=${14} /> Hôm nay: ${today ? `${today.threads ?? '—'} hội thoại · ${(today.received + today.sent).toLocaleString('vi-VN')} tin` : '—'}</span>
       ${host ? html`<a class=${`ov-pill${Math.max(host.cpuPct, host.ramPct, host.diskPct) >= 85 ? ' is-warn' : ''}`} href="#/health"><${Icon} name="server" size=${14} /> CPU ${Math.round(host.cpuPct)}% · RAM ${Math.round(host.ramPct)}% · Ổ ${Math.round(host.diskPct)}%</a>` : null}
     </div>

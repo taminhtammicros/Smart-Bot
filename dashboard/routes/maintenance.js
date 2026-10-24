@@ -38,10 +38,6 @@ export function maintenanceRoutes({ maintenance, hermesAdmin, restartFlags, acti
     try { const update = await maintenance.updateHermes(); log(req, 'hermes_update', 'hermes update --yes --backup'); res.json({ ok: true, update }); } catch (err) { fail(res, err, 'Chưa chạy được cập nhật Hermes.'); }
   });
 
-  // Cập nhật bot: ai đăng nhập cũng thấy "có bản mới" (thanh trạng thái), chỉ Quản trị bấm cập nhật được.
-  r.get('/update-notice', requireAuth, async (req, res) => {
-    try { res.json({ ok: true, ...(await maintenance.botNotice()) }); } catch (err) { fail(res, err, 'Chưa kiểm tra được bản mới.'); }
-  });
   r.get('/admin/maintenance/bot-update', ...guard, (req, res) => {
     try { res.json({ ok: true, botUpdate: maintenance.botUpdateState() }); } catch (err) { fail(res, err, 'Chưa đọc được tiến độ cập nhật.'); }
   });

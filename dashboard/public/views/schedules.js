@@ -12,6 +12,7 @@ export const REPEAT_LABELS = { 0: 'Một lần', 1: 'Hằng ngày', 2: 'Hằng t
 
 /** Trạng thái một việc hẹn giờ: { kind, text } cho nhãn màu. */
 export function jobState(j) {
+  if (j.terminal) return { kind: 'idle', text: 'Đã chạy xong' };
   if (!j.enabled) return { kind: 'idle', text: 'Đã tắt' };
   if (j.paused) return { kind: 'warn', text: 'Tạm dừng' };
   if (j.lastStatus && j.lastStatus !== 'ok') return { kind: 'danger', text: 'Lần trước lỗi' };
@@ -90,7 +91,7 @@ function JobDialog({ job, convs, admin, onDone, onClose }) {
     const body = { name, prompt, targets, ...(advanced ? (admin ? { expr } : {}) : { spec: clean }) };
     try {
       await api(job ? `/api/schedules/cron/${job.id}` : '/api/schedules/cron', { method: job ? 'PUT' : 'POST', body });
-      onDone(job ? `Đã lưu "${name}".` : `Đã tạo lịch hẹn "${name}".`);
+      onDone(job ? (job.terminal && scheduleChanged ? `Đã hẹn lại "${name}".` : `Đã lưu "${name}".`) : `Đã tạo lịch hẹn "${name}".`);
     } catch (err) { setError(err.message); setBusy(false); }
   }
   async function act(action) {
@@ -103,6 +104,7 @@ function JobDialog({ job, convs, admin, onDone, onClose }) {
   return html`<${Dialog} title=${job ? 'Sửa lịch hẹn' : 'Tạo lịch hẹn'} onClose=${onClose} dirty=${dirty} wide>
     <form class="stack" onSubmit=${save}>
       ${st ? html`<p><span class=${`badge badge-${st.kind}`}>${st.text}</span> <small class="muted">Lần tới: ${fmtTime(job.nextRunAt)} · Lần trước: ${fmtTime(job.lastRunAt)}${job.creatorName ? ` · ${job.creatorName} tạo` : ''}</small></p>` : null}
+      ${job?.terminal ? html`<${Notice} kind="info">Việc một lần này đã chạy xong. Chọn ngày giờ mới rồi bấm "Lưu & chạy lại" để hẹn lại lần nữa.<//>` : null}
       <label class="field"><span>Tên</span><input value=${name} maxlength="120" required placeholder="Ví dụ: Nhắc nộp bài" onInput=${(e) => setName(e.currentTarget.value)} /></label>
       <label class="field"><span>Bot sẽ làm gì</span>
         <textarea rows="3" maxlength="2000" required value=${prompt} placeholder="Ví dụ: Nhắc lớp 12A1 nộp bài tập Hoá trước 21h, kèm lời động viên ngắn." onInput=${(e) => setPrompt(e.currentTarget.value)}></textarea></label>
@@ -132,8 +134,8 @@ function JobDialog({ job, convs, admin, onDone, onClose }) {
           <small class="muted">${problem || describeSpec(clean)} · giờ Việt Nam</small></fieldset>`}
       <${Live} error=${error} />
       <div class="dialog-actions">
-        <button class="btn btn-primary" disabled=${busy}>${busy ? 'Đang lưu…' : job ? 'Lưu' : 'Tạo lịch hẹn'}</button>
-        ${job ? (job.paused ? html`<button type="button" class="btn btn-secondary" disabled=${busy} onClick=${() => act('resume')}>Chạy lại</button>`
+        <button class="btn btn-primary" disabled=${busy}>${busy ? 'Đang lưu…' : job ? (job.terminal ? 'Lưu & chạy lại' : 'Lưu') : 'Tạo lịch hẹn'}</button>
+        ${job && !job.terminal ? (job.paused ? html`<button type="button" class="btn btn-secondary" disabled=${busy} onClick=${() => act('resume')}>Chạy lại</button>`
           : html`<button type="button" class="btn btn-secondary" disabled=${busy} onClick=${() => act('pause')}>Tạm dừng</button>`) : null}
         ${job ? html`<button type="button" class="btn btn-danger-outline" disabled=${busy} onClick=${() => act('remove')}>Xoá</button>` : null}
       </div>

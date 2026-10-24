@@ -107,15 +107,14 @@ function NavIcon({ path, icon }) {
   return html`<span class=${`nav-ico tint-${tintOf(path)}`} aria-hidden="true"><${Icon} name=${icon} size=${16} /></span>`;
 }
 
-/** Số liệu nhỏ bên phải mục menu (như "CPU 59%"): số hội thoại có tin hôm nay, CPU máy chủ, có bản mới. */
-export function navValue(path, status, notice) {
+/** Số liệu nhỏ bên phải mục menu (như "CPU 59%"): số hội thoại có tin hôm nay, CPU máy chủ. */
+export function navValue(path, status) {
   if (path === '/chats' && status?.today) {
     // Bản cũ của máy chủ chưa có `threads` → vẫn hiện số tin như trước.
     return Number.isFinite(status.today.threads) ? String(status.today.threads) : String((status.today.received || 0) + (status.today.sent || 0));
   }
   if (path === '/health' && Number.isFinite(status?.host?.cpuPct)) return `${Math.round(status.host.cpuPct)}%`;
   if (path === '/zalo' && status) return status.sidecar === 'down' || status.zalo?.status !== 'logged-in' ? 'Tắt' : '';
-  if (path === '/maintenance' && notice?.newer) return 'Mới';
   return '';
 }
 
@@ -173,39 +172,7 @@ export function hostLoad(h) {
   return rows.length ? rows.map(([k, v]) => `${k} ${Math.round(v)}%`).join(', ') : '';
 }
 
-/**
- * Báo có bản bot mới. Hỏi máy chủ khi mở trang, khi quay lại tab, mỗi 15 giây lúc đang cập nhật, mỗi 2 phút lúc đang
- * báo có bản mới (để nhãn tự tắt ngay khi cập nhật xong ở nơi khác), còn lại mỗi giờ. `loaded`: bản máy chủ lúc trang
- * này mở — máy chủ đã lên bản khác thì nhắc tải lại trang.
- */
-function useUpdateNotice() {
-  const [n, setN] = useState(null);
-  const loaded = useRef('');
-  const updating = Boolean(n?.updating);
-  const newer = Boolean(n?.newer);
-  useEffect(() => {
-    const load = () => api('/api/update-notice').then((r) => { if (!loaded.current && r.current) loaded.current = r.current; setN({ ...r, loaded: loaded.current }); }).catch(() => {});
-    load();
-    const t = setInterval(load, updating ? 15_000 : newer ? 120_000 : 3600_000);
-    const onShow = () => { if (document.visibilityState === 'visible') load(); };
-    document.addEventListener('visibilitychange', onShow);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onShow); };
-  }, [updating, newer]);
-  return n;
-}
-
-/** Máy chủ đã chạy bản khác bản lúc trang mở (vừa cập nhật xong) → cần tải lại trang. */
-export const reloadNeeded = (n) => Boolean(n && !n.updating && n.loaded && n.current && n.current !== n.loaded);
-
-export function noticeText(n) {
-  if (!n) return '';
-  if (n.updating) return 'Đang cập nhật bot…';
-  if (reloadNeeded(n)) return `Đã cập nhật lên v${String(n.current).replace(/^v/, '')} — tải lại trang`;
-  return n.newer ? `Có bản mới ${n.latest}` : '';
-}
-
-function StatusStrip({ status, error, path, admin, update }) {
-  const notice = noticeText(update);
+function StatusStrip({ status, error, path }) {
   let lv;
   if (error) lv = { kind: 'warn', icon: 'warn', text: `Không cập nhật được trạng thái. ${error}` };
   else if (status) lv = statusLevel(status);
@@ -213,9 +180,6 @@ function StatusStrip({ status, error, path, admin, update }) {
   return html`<div class=${`strip strip-${lv.kind}`} role="status" aria-live="polite">
     <span class="strip-text"><${Icon} name=${lv.icon} /> ${lv.text}</span>
     <span class="strip-actions">
-      ${notice && reloadNeeded(update) ? html`<button type="button" class="update-pill" onClick=${() => location.reload()}><${Icon} name="refresh" size=${16} /> ${notice}</button>`
-        : notice ? (admin && path !== '/maintenance' ? html`<a class="update-pill" href="#/maintenance"><${Icon} name="download" size=${16} /> ${notice}</a>`
-        : html`<span class="update-pill" title=${admin ? '' : 'Báo người quản trị để cập nhật'}><${Icon} name="download" size=${16} /> ${notice}</span>`) : null}
       ${lv.qr && path !== '/zalo' ? html`<a class="btn btn-light btn-sm" href="#/zalo"><${Icon} name="qr" size=${16} /> Quét mã đăng nhập lại</a>` : null}
       <${CommunityButton} />
       <${DonateButton} className="donate-pill" />
@@ -302,9 +266,9 @@ function MobileNav({ me, path, features }) {
   </nav>`;
 }
 
-function Sidebar({ me, brand, path, features, status, update }) {
+function Sidebar({ me, brand, path, features, status }) {
   const link = (it) => {
-    const v = navValue(it.path, status, update);
+    const v = navValue(it.path, status);
     const tip = it.path === '/chats' && status?.today && Number.isFinite(status.today.threads)
       ? `${status.today.threads} hội thoại có tin hôm nay · ${(status.today.received || 0) + (status.today.sent || 0)} tin` : undefined;
     return html`<a class=${`nav-item${path === it.path ? ' active' : ''}`} href=${`#${it.path}`} title=${tip}
@@ -339,19 +303,17 @@ function Message({ icon, title, children }) {
 export function Shell({ me, brand, path }) {
   const [status, error, refresh] = useStatus();
   const features = useFeatures();
-  const update = useUpdateNotice();
   const r = ROUTES[path];
   const mainRef = useRef(null);
   const crumbs = r ? crumbsFor(path) : [];
   useEffect(() => { mainRef.current?.focus(); }, [path]);
   let body;
   if (!r) body = html`<${Message} icon="info" title="Không tìm thấy trang">Đường dẫn này không có trong dashboard.<//>`;
-  else if (r.admin && me.role !== 'admin') body = html`<${Message} icon="shield" title="Không có quyền">Trang này chỉ dành cho Quản trị. Nếu cần, hãy nhờ Quản trị làm giúp.<//>`;
-  else body = html`<${r.view} me=${me} status=${status} refresh=${refresh} update=${update} />`;
+  else body = html`<${r.view} me=${me} status=${status} refresh=${refresh} />`;
   return html`<div class="layout">
-    <${Sidebar} me=${me} brand=${brand} path=${path} features=${features} status=${status} update=${update} />
+    <${Sidebar} me=${me} brand=${brand} path=${path} features=${features} status=${status} />
     <div class="main-col">
-      <${StatusStrip} status=${status} error=${error} path=${path} admin=${me.role === 'admin'} update=${update} />
+      <${StatusStrip} status=${status} error=${error} path=${path} />
       <main class=${`content tint-${tintOf(path)}`} ref=${mainRef} tabindex="-1">
         ${crumbs.length ? html`<nav class="crumbs" aria-label="Vị trí trang"><ol>${crumbs.map((c, i) => html`<li key=${c}
           aria-current=${i === crumbs.length - 1 ? 'page' : undefined}>${c}</li>`)}</ol></nav>` : null}

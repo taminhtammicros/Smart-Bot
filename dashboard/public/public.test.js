@@ -1055,21 +1055,11 @@ test('Bảo trì: định dạng dung lượng và giờ điểm khôi phục', 
 
 test('Ủng hộ tác giả: thông tin chuyển khoản và ảnh QR có sẵn trong giao diện', async () => {
   const { DONATE } = await import('./views/donate.js');
-  assert.deepEqual(DONATE, { bank: 'MB Bank', account: '0328186264', name: 'LUONG HAI ANH' });
+  assert.deepEqual(DONATE, { bank: 'MB Bank', account: '0988328338', name: 'TA MINH TAM' });
   const { existsSync } = await import('node:fs');
   assert.ok(existsSync(new URL('./donate-qr.jpg', import.meta.url)));
 });
 
-test('thanh trạng thái: nhãn bản mới / đang cập nhật', async () => {
-  const { noticeText } = await import('./views/shell.js');
-  assert.equal(noticeText(null), '');
-  assert.equal(noticeText({ newer: false }), '');
-  assert.equal(noticeText({ newer: true, latest: 'v2.9.0' }), 'Có bản mới v2.9.0');
-  assert.equal(noticeText({ newer: true, latest: 'v2.9.0', updating: true }), 'Đang cập nhật bot…');
-  // Trang mở lúc 2.34.0, máy chủ đã lên 2.35.0 (cập nhật ở nơi khác) → nhắc tải lại thay vì "có bản mới".
-  assert.equal(noticeText({ newer: false, current: '2.35.0', loaded: '2.34.0', latest: 'v2.35.0' }), 'Đã cập nhật lên v2.35.0 — tải lại trang');
-  assert.equal(noticeText({ newer: false, current: '2.35.0', loaded: '2.35.0' }), '', 'cùng bản thì không báo gì');
-});
 
 test('Phiên chat: dò "@" đang gõ và tính vị trí tag trên nội dung gửi', async () => {
   const { mentionQuery, placeMentions } = await import('./views/chats.js');
@@ -1094,7 +1084,6 @@ test('Tổng quan: biểu đồ chấm và gộp cột; menu có màu và số l
   assert.equal(navValue('/chats', { today: { received: 3, sent: 2 } }), '5', 'máy chủ cũ: số tin');
   assert.equal(navValue('/chats', { today: { received: 3, sent: 2, threads: 2 } }), '2', 'số hội thoại có tin hôm nay');
   assert.equal(navValue('/health', { host: { cpuPct: 12.6 } }), '13%');
-  assert.equal(navValue('/maintenance', null, { newer: true }), 'Mới');
   assert.equal(navValue('/', {}), '');
 });
 
@@ -1169,13 +1158,16 @@ test('tổng quan: cần chú ý gom đúng việc, kèm chỗ xử lý; hội t
   const ok = { sidecar: 'up', assistant: 'connected', zalo: { status: 'logged-in', displayName: 'Bot', listener: 'connected' }, lastError: null };
   assert.deepEqual(attentionItems({ status: ok, admin: true }), [], 'mọi thứ ổn → không có gì');
   const now = Date.UTC(2026, 9, 13, 5);
+  // Chưa nối lần nào = bot đang chờ Hermes mở — bình thường, không phải "chưa phản hồi".
+  assert.deepEqual(attentionItems({ status: { ...ok, assistant: 'disconnected', traffic: { lastInboundAtMs: null, lastOutboundAtMs: null } }, admin: true }), [],
+    'chưa từng nối thì không báo');
   const items = attentionItems({
-    status: { ...ok, assistant: 'disconnected', lastError: { code: 'bridge_command_failed', atMs: now - 3600_000 } },
+    status: { ...ok, assistant: 'disconnected', traffic: { lastInboundAtMs: now - 90_000, lastOutboundAtMs: null }, lastError: { code: 'bridge_command_failed', atMs: now - 3600_000 } },
     host: { cpuPct: 20, ramPct: 91, diskPct: 40 }, requests: [{ uid: '1', name: 'A' }],
     memory: { user: { label: 'Hồ sơ chủ nhân', used: 1300, limit: 1375 }, memory: { label: 'Ghi chú', used: 100, limit: 2200 } },
-    notice: { newer: true, latest: 'v9' }, admin: true, now,
+    admin: true, now,
   });
-  assert.deepEqual(items.map((i) => i.kind), ['danger', 'warn', 'info', 'warn', 'warn', 'info']);
+  assert.deepEqual(items.map((i) => i.kind), ['danger', 'warn', 'info', 'warn', 'warn']);
   assert.equal(items[0].action, 'restart');
   assert.equal(items[2].requests, true);
   assert.match(items[4].text, /Hồ sơ chủ nhân đã đầy 95%/);

@@ -9,7 +9,7 @@ function withKb(t) {
   const deps = makeDeps(t);
   const root = join(deps.dir, 'kho');
   mkdirSync(root);
-  deps.kb = createKbStore({ kbDir: () => root, publicDirs: () => '', foldersFile: join(deps.dir, 'kb-folders.json') });
+  deps.kb = createKbStore({ kbDir: () => root, foldersFile: join(deps.dir, 'kb-folders.json') });
   return deps;
 }
 

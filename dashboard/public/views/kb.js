@@ -208,38 +208,35 @@ function MoveDocs({ paths, folders, onDone, onClose }) {
 }
 
 /**
- * Đổi nguồn (chỉ Quản trị): chọn gốc trong danh sách người cài đặt cho phép, rồi chọn thư mục bot được đọc
- * (giữ thứ tự chọn — thư mục đầu chứa tài liệu tự tạo). Không chọn gì = cả kho, phải xác nhận.
+ * Đổi nguồn (chỉ Quản trị): chọn gốc trong danh sách người cài đặt cho phép. Bot luôn đọc CẢ kho —
+ * không còn phạm vi thư mục mở riêng (ZALO_KB_PUBLIC_DIRS đã ngừng dùng).
  */
 function SourceEditor({ onDone, onClose }) {
   const [roots, setRoots] = useState(null);
   const [dir, setDir] = useState('');
   const [subdirs, setSubdirs] = useState([]);
-  const [picked, setPicked] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
     api('/api/admin/kb/source').then((r) => {
       setRoots(r.roots); setDir(r.exists ? r.dir : (r.roots[0] || ''));
-      setSubdirs(r.subdirs); setPicked(r.publicDirs);
+      setSubdirs(r.subdirs);
       if (!r.exists && r.roots[0]) choose(r.roots[0]);
     }).catch((e) => setError(e.message));
   }, []);
   async function choose(next) {
     setDir(next); setBusy(true); setError('');
-    try { const r = await api(`/api/admin/kb/source?dir=${encodeURIComponent(next)}`); setSubdirs(r.subdirs); setPicked((p) => p.filter((x) => r.subdirs.includes(x))); } catch (e) { setError(e.message); setSubdirs([]); } finally { setBusy(false); }
+    try { const r = await api(`/api/admin/kb/source?dir=${encodeURIComponent(next)}`); setSubdirs(r.subdirs); } catch (e) { setError(e.message); setSubdirs([]); } finally { setBusy(false); }
   }
   async function save(e) {
     e.preventDefault();
-    const allDirs = !picked.length;
-    if (allDirs && !confirm('Chưa chọn thư mục nào — bot sẽ đọc CẢ kho (mọi thư mục bên trong). Tiếp tục?')) return;
+    if (!confirm('Bot sẽ đọc CẢ kho (mọi thư mục bên trong thư mục gốc). Tiếp tục?')) return;
     setBusy(true); setError('');
     try {
-      const r = await api('/api/admin/kb/source', { method: 'PUT', body: { dir, publicDirs: picked, allDirs } });
+      const r = await api('/api/admin/kb/source', { method: 'PUT', body: { dir, allDirs: true } });
       onDone(r.changed ? 'Đã đổi nguồn. Khởi động lại trợ lý để bot đọc nguồn mới.' : 'Nguồn không thay đổi.');
     } catch (err) { setError(err.message); setBusy(false); }
   }
-  const toggle = (d) => setPicked((p) => (p.includes(d) ? p.filter((x) => x !== d) : [...p, d]));
   return html`<${Dialog} title="Sửa nguồn kho tri thức" onClose=${onClose}>
     ${!roots ? html`<${Live} error=${error} />${error ? null : html`<${Spinner} />`}` : !roots.length
       ? html`<${Notice} kind="info">Chưa có thư mục nào để chọn. Người cài đặt cần đặt ZALO_KB_DIR (hoặc danh sách ZALO_KB_ALLOWED_ROOTS, cách nhau bằng ";") trong cài đặt của trợ lý.<//>`
@@ -247,10 +244,8 @@ function SourceEditor({ onDone, onClose }) {
       <label class="field"><span>Thư mục gốc</span>
         <select value=${dir} disabled=${busy} onChange=${(e) => choose(e.currentTarget.value)}>${roots.map((r) => html`<option key=${r} value=${r}>${r}</option>`)}</select>
         <small class="muted">Chỉ chọn được trong các thư mục người cài đặt cho phép (ZALO_KB_ALLOWED_ROOTS) — để bảo vệ dữ liệu trên máy. Thư mục Google Drive đồng bộ về máy dùng như thư mục thường.</small></label>
-      <fieldset class="field"><legend>Thư mục bot được đọc</legend>
-        ${picked.length ? html`<p class="muted small">Tài liệu tự tạo lưu trong: <strong>${picked[0]}</strong> (thư mục chọn đầu tiên).</p>` : html`<p class="muted small">Chưa chọn = bot đọc cả kho.</p>`}
-        ${subdirs.length ? html`<div class="check-grid">${subdirs.map((d) => html`<label key=${d} class="check"><input type="checkbox" checked=${picked.includes(d)} onChange=${() => toggle(d)} /> ${d}</label>`)}</div>`
-          : html`<p class="muted small">Thư mục này chưa có thư mục con.</p>`}</fieldset>
+      <p class="muted small">Bot đọc toàn bộ thư mục này (luật an toàn vẫn áp: bỏ thư mục ẩn/mã nguồn và tên chứa khach-hang, secret, token…). Tài liệu tự tạo lưu trong <strong>tai-len-dashboard</strong>.</p>
+      ${subdirs.length ? html`<p class="muted small">Thư mục con hiện có: ${subdirs.join(', ')}</p>` : null}
       <${Live} error=${error} />
       <div class="dialog-actions"><button class="btn btn-primary" disabled=${busy || !dir}>${busy ? 'Đang lưu…' : 'Lưu nguồn'}</button></div>
     </form>`}

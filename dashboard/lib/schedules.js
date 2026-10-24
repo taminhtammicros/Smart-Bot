@@ -77,6 +77,10 @@ export function zaloJobs(data) {
       nextRunAt: j.next_run_at ? Date.parse(j.next_run_at) || null : null,
       lastRunAt: j.last_run_at ? Date.parse(j.last_run_at) || null : null,
       lastStatus: short(j.last_status, 20), target: cronTarget(j), targets: cronTargets(j),
+      // `terminal`: việc một lần đã chạy xong (state completed/error) — Hermes không cho sửa giờ trực tiếp, phải
+      // "chạy lại" (`cron resume --at`). `scheduleKind`: 'once' | 'cron' | 'interval' — biết lịch có phải một lần không.
+      terminal: (j.state === 'completed' || j.state === 'error') && j.schedule?.kind === 'once',
+      scheduleKind: short(j.schedule?.kind || '', 20),
       kind: group ? 'group' : 'owner',
       creatorName: group ? short(o.zalo_creator_name, 80) : '',
     };
@@ -101,7 +105,11 @@ export function hermesBin({ hermesHome, env = process.env, platform = process.pl
 }
 
 const defaultExec = (file, args, opts) => new Promise((resolve, reject) => {
-  execFile(file, args, opts, (e, stdout, stderr) => (e ? reject(Object.assign(e, { stderr: String(stderr || '') })) : resolve({ stdout: String(stdout) })));
+  // Giữ CẢ stdout lẫn stderr khi lỗi: Hermes thoát khác 0 vẫn in lý do từ chối ra stdout — mất nó thì dashboard
+  // chỉ còn câu 502 chung thay vì nói đúng người dùng phải sửa gì.
+  execFile(file, args, opts, (e, stdout, stderr) => (e
+    ? reject(Object.assign(e, { stdout: String(stdout || ''), stderr: String(stderr || '') }))
+    : resolve({ stdout: String(stdout) })));
 });
 
 const RAW_CRON = /^[\w*,/-]+( [\w*,/-]+){4}$/;
@@ -154,26 +162,37 @@ export function createSchedules({ hermesHome, bin, execImpl = defaultExec, env =
   const fail = () => Object.assign(new Error('Trợ lý chưa làm được việc này — tải lại trang xem trạng thái, rồi thử lại sau ít phút; nếu vẫn lỗi hãy báo người cài đặt.'), { statusCode: 502 });
   const rawJob = (id) => (readRaw(hermesHome).jobs || []).find((j) => String(j?.id) === String(id));
   /**
-   * Chạy `hermes cron …` (không qua shell). Hermes thoát 0 cả khi từ chối — dòng "Failed to … job: <lý do>" là lỗi
-   * người dùng sửa được (lịch đã qua, cron sai…) → 400 kèm lý do; lỗi chạy lệnh → `onCrash` quyết (mặc định 502).
+   * Chạy `hermes cron …` (không qua shell). Hermes có thể thoát 0 HOẶC khác 0 khi từ chối — dòng
+   * "Failed to … job: <lý do>" là lỗi người dùng sửa được (lịch đã qua, cron sai, việc đã chạy xong…) → 400 kèm lý do
+   * thật. Chỉ khi KHÔNG có dòng từ chối nào mới coi là sự cố bên trong → `fail()` (502).
    */
   async function run(args, label) {
     let out;
     try {
       out = await execImpl(bin, ['cron', ...args], { windowsHide: true, timeout: 30_000, env: { ...env, HERMES_HOME: hermesHome } });
     } catch (e) {
+      // Hermes thoát khác 0 cho cả lỗi người dùng sửa được: đọc stdout/stderr trước khi coi là sự cố.
+      const why = refusalIn(`${e?.stdout ?? ''}\n${e?.stderr ?? ''}`);
+      if (why !== undefined) refuse(label, why);
       console.error('[dashboard] hermes cron', label, 'lỗi:', e.message, e.stderr?.slice(0, 300));
       return false;
     }
-    const refused = /^\s*(?:Failed to (?:create|update) job|Blocked)[:\s]*(.*)$/m.exec(String(out?.stdout ?? ''));
-    if (refused) {
-      console.error('[dashboard] hermes cron', label, 'từ chối:', refused[0].slice(0, 300));
-      const why = refused[1].trim();
-      if (/in the past/i.test(why)) throw bad('Thời điểm này đã qua — chọn ngày giờ sau bây giờ.');
-      if (/invalid cron|out of range/i.test(why)) throw bad('Lịch chạy không hợp lệ — kiểm lại giờ, ngày.');
-      throw bad(`Trợ lý không nhận lịch này: ${why.slice(0, 200) || 'kiểm lại ngày giờ'}.`);
-    }
+    const why = refusalIn(out?.stdout);
+    if (why !== undefined) refuse(label, why);
     return true;
+  }
+  /** Dòng "Failed to <động từ> job: <lý do>" (hoặc "Blocked") trong kết quả Hermes; undefined = không có. */
+  function refusalIn(text) {
+    const m = /^\s*(?:Failed to \w+ job|Blocked)[:\s]*(.*)$/m.exec(String(text ?? ''));
+    return m ? m[1].trim() : undefined;
+  }
+  /** Lý do Hermes từ chối → câu 400 dễ hiểu (ném), để người dùng biết phải sửa gì. */
+  function refuse(label, why) {
+    console.error('[dashboard] hermes cron', label, 'từ chối:', why.slice(0, 300));
+    if (/in the past/i.test(why)) throw bad('Thời điểm này đã qua — chọn ngày giờ sau bây giờ.');
+    if (/invalid cron|out of range|not acceptable/i.test(why)) throw bad('Lịch chạy không hợp lệ — kiểm lại giờ, ngày.');
+    if (/terminal cron job/i.test(why)) throw bad('Việc một lần này đã chạy xong nên không tạm dừng/chạy lại kiểu thường được — sửa lại lịch (chọn ngày giờ mới) để mở lại.');
+    throw bad(`Trợ lý không nhận lịch này: ${why.slice(0, 200) || 'kiểm lại ngày giờ'}.`);
   }
   return {
     list: () => readZaloJobs(hermesHome),
@@ -206,20 +225,31 @@ export function createSchedules({ hermesHome, bin, execImpl = defaultExec, env =
         } else prompt = input.prompt;
         args.push(`--prompt=${prompt}`);
       }
+      // Việc một lần ĐÃ CHẠY XONG (terminal): Hermes từ chối `edit --schedule` (không cho tự kích hoạt lại).
+      // Đặt lại giờ bằng `cron resume <id> --at <giờ>` — đúng đường Hermes chỉ.
+      const terminal = Boolean(job.terminal) && raw.schedule?.kind === 'once';
+      let rearm;
       if (input.schedule !== undefined && !sameSchedule(raw, input.schedule)) {
-        args.push(`--schedule=${input.schedule}`);
-        const wasOnce = raw.schedule?.kind === 'once';
-        const completed = Number(raw.repeat?.completed) || 0;
-        if (wasOnce && !isOnce(input.schedule)) args.push('--repeat=0');            // lặp mãi
-        else if (!wasOnce && isOnce(input.schedule)) args.push(`--repeat=${completed + 1}`); // chạy đúng một lần nữa
+        if (terminal) {
+          if (!isOnce(input.schedule)) throw bad('Việc một lần đã chạy xong chỉ đặt lại được một mốc giờ một lần — chọn lại "Một lần".');
+          rearm = input.schedule;
+        } else {
+          args.push(`--schedule=${input.schedule}`);
+          const wasOnce = raw.schedule?.kind === 'once';
+          const completed = Number(raw.repeat?.completed) || 0;
+          if (wasOnce && !isOnce(input.schedule)) args.push('--repeat=0');            // lặp mãi
+          else if (!wasOnce && isOnce(input.schedule)) args.push(`--repeat=${completed + 1}`); // chạy đúng một lần nữa
+        }
       }
       const sameTargets = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
       if (input.targets !== undefined && !sameTargets(input.targets, job.targets)) {
         if (group) throw bad('Việc do thành viên nhóm tạo chỉ gửi vào chính nhóm đó — muốn gửi nơi khác hãy tạo lịch hẹn mới.');
         args.push(`--deliver=${rebuildDeliver(raw, input.targets)}`);
       }
-      if (args.length === 2) return job; // không có gì đổi
-      if (!(await run(args, `edit ${id}`))) throw fail();
+      if (args.length === 2 && rearm === undefined) return job; // không có gì đổi
+      // Sửa tên/việc/nơi gửi chạy trước (Hermes vẫn cho trên việc đã chạy xong); rồi mới mở lại giờ.
+      if (args.length > 2 && !(await run(args, `edit ${id}`))) throw fail();
+      if (rearm !== undefined && !(await run(['resume', id, `--at=${rearm}`], `resume ${id}`))) throw fail();
       const after = rawJob(id);
       const view = readZaloJobs(hermesHome).find((j) => j.id === id);
       const ok = after && view && (input.name === undefined || view.name === input.name)
@@ -234,19 +264,20 @@ export function createSchedules({ hermesHome, bin, execImpl = defaultExec, env =
       if (!CRON_ACTIONS.includes(action)) throw Object.assign(new Error('Thao tác không hợp lệ — tải lại trang.'), { statusCode: 400 });
       const job = readZaloJobs(hermesHome).find((j) => j.id === id);
       if (!JOB_ID.test(String(id)) || !job) throw Object.assign(new Error('Không tìm thấy việc hẹn giờ này — tải lại trang.'), { statusCode: 404 });
-      const fail = () => Object.assign(new Error('Trợ lý chưa làm được việc này — tải lại trang xem trạng thái, rồi thử lại sau ít phút; nếu vẫn lỗi hãy báo người cài đặt.'), { statusCode: 502 });
       let out;
       try {
         out = await execImpl(bin, ['cron', action, id], { windowsHide: true, timeout: 30_000, env: { ...env, HERMES_HOME: hermesHome } });
       } catch (e) {
+        // Khi lệnh thoát khác 0 vì lý do người dùng sửa được (việc đã chạy xong…), Hermes in dòng "Failed to
+        // <action> job: <lý do>" ra stdout — map sang 400 kèm lý do thật thay vì 502 chung.
+        const why = refusalIn(`${e?.stdout ?? ''}\n${e?.stderr ?? ''}`);
+        if (why !== undefined) refuse(`${action} ${id}`, why);
         console.error('[dashboard] hermes cron', action, id, 'lỗi:', e.message, e.stderr?.slice(0, 300));
         throw fail();
       }
-      // `hermes cron` thoát 0 cả khi thất bại (cmd_cron bỏ mã trả về) → kiểm lại chữ báo lỗi và trạng thái thật trong jobs.json.
-      if (/Failed to/i.test(String(out?.stdout ?? ''))) {
-        console.error('[dashboard] hermes cron', action, id, 'báo lỗi:', String(out.stdout).slice(0, 300));
-        throw fail();
-      }
+      // `hermes cron` có thể thoát 0 kèm chữ báo lỗi → vẫn kiểm lại chữ báo và trạng thái thật trong jobs.json.
+      const refusedText = /^\s*Failed to (?:pause|resume|remove) job[:\s]*(.*)$/m.exec(String(out?.stdout ?? ''));
+      if (refusedText) refuse(`${action} ${id}`, refusedText[1].trim());
       let after;
       try { after = readZaloJobs(hermesHome).find((j) => j.id === id); } catch { after = undefined; }
       const ok = action === 'remove' ? !after : Boolean(after) && after.paused === (action === 'pause');
