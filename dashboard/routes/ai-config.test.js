@@ -23,7 +23,7 @@ function withAi(t) {
   };
   deps.agentConfig = createAgentConfig({ configFile, fetchImpl });
   deps.aiKeys = createAiKeys({ envFile, configFile, fetchImpl, poolFile: join(deps.dir, 'key-pool.json') });
-  deps.aiModels = createAiModels({ configFile, fetchImpl, ovConf: join(deps.dir, 'khong-co.conf') });
+  deps.aiModels = createAiModels({ configFile, fetchImpl, sqliteFile: join(deps.dir, 'zalo.sqlite') });
   return { deps, envFile, configFile };
 }
 
@@ -97,4 +97,39 @@ test('Tạo ảnh & video: chỉ Quản trị; lưu thứ tự nguồn → chọ
   const tried = (await call('/api/admin/ai/media/test', { method: 'POST', cookie: admin, body: { kind: 'image', engine: 'stali' } })).json;
   assert.equal(tried.result.ok, true);
   assert.deepEqual(deps.activity.list().filter((e) => e.action === 'media_engines').length, 1);
+});
+
+test('Trí nhớ dài hạn: thẻ đọc kho SQLite nội bộ theo account_id thật (không đọc tệp ngoài sidecar)', async (t) => {
+  const { deps, configFile } = withAi(t);
+  const sqliteFile = join(deps.dir, 'zalo.sqlite');
+  deps.aiModels = createAiModels({ configFile, fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }), sqliteFile });
+  const { call } = await startApp(t, deps);
+  const admin = await loginAs(t, deps, call);
+
+  const before = (await call('/api/admin/ai/models', { cookie: admin })).json;
+  assert.deepEqual(before.cards.filter((c) => c.id === 'memory'), [], 'config.yaml chưa bật zalo_memory → không có thẻ');
+
+  writeFileSync(configFile, readFileSync(configFile, 'utf8').replace('model:\n', 'memory:\n  provider: zalo_memory\nmodel:\n'));
+  const absent = (await call('/api/admin/ai/models', { cookie: admin })).json;
+  assert.deepEqual(absent.cards.filter((c) => c.id === 'memory').map((c) => c.model), ['0 fact · 0 hồ sơ · 0 trí nhớ mềm']);
+
+  // account_id thật là UID Zalo của bot, lấy từ tin nhắn mới nhất — không phải chuỗi cố định.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(sqliteFile);
+  db.exec(`CREATE TABLE messages (account_id TEXT, timestamp_ms INTEGER);
+    CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, account_id TEXT, status TEXT, updated_at_ms INTEGER);
+    CREATE TABLE profiles (account_id TEXT, updated_at_ms INTEGER);
+    CREATE TABLE soft_memories (id INTEGER PRIMARY KEY, account_id TEXT, status TEXT, updated_at_ms INTEGER);`);
+  db.prepare('INSERT INTO messages (account_id, timestamp_ms) VALUES (?,?)').run('bot-uid-1', 1_700_000_300_000);
+  db.prepare('INSERT INTO facts (account_id, status, updated_at_ms) VALUES (?,?,?), (?,?,?), (?,?,?)')
+    .run('bot-uid-1', 'active', 1_700_000_000_000, 'bot-uid-1', 'deleted', 1, 'khac', 'active', 1);
+  db.prepare('INSERT INTO profiles (account_id, updated_at_ms) VALUES (?,?), (?,?)').run('bot-uid-1', 1_700_000_100_000, 'khac', 1);
+  db.prepare('INSERT INTO soft_memories (account_id, status, updated_at_ms) VALUES (?,?,?)').run('bot-uid-1', 'active', 1_700_000_200_000);
+  db.close();
+
+  const after = (await call('/api/admin/ai/models', { cookie: admin })).json;
+  const card = after.cards.find((c) => c.id === 'memory');
+  assert.equal(card.model, '1 fact · 1 hồ sơ · 1 trí nhớ mềm', 'chỉ đếm dòng active của đúng UID bot');
+  assert.match(card.note, /Cập nhật gần nhất \d{2}:\d{2} \d{2}-\d{2}/, 'mốc thời gian lấy từ dòng mới nhất');
+  assert.ok(!JSON.stringify(after).includes('.openviking'), 'trang không còn phụ thuộc ov.conf');
 });

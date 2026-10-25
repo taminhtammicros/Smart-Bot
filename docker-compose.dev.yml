@@ -1,0 +1,60 @@
+# ============================================================================
+#  2Anh Zalo Bot — docker compose cho phát triển
+# ============================================================================
+#  Dùng khi sửa mã và muốn thấy thay đổi ngay, không build lại image:
+#
+#    docker compose -f docker-compose.dev.yml up
+#
+#  Khác bản production:
+#    • mount mã nguồn từ máy host → sửa tệp là chạy lại là thấy
+#    • node_modules nằm trong named volume (không đè bởi thư mục host, vốn
+#      chứa binary biên dịch cho macOS và sẽ hỏng trong container Linux)
+#    • không có restart policy, log đầy đủ ra terminal
+# ============================================================================
+
+name: 2anh-zalo-bot-dev
+
+services:
+  bot:
+    image: 2anh/zalo-bot:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: 2anh-zalo-bot-dev
+    init: true
+    command: ["node", "--watch", "server.js"]
+
+    ports:
+      - "127.0.0.1:3880:3872"
+      - "127.0.0.1:3873:3873"
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      HERMES_HOME: /hermes
+      TZ: Asia/Ho_Chi_Minh
+      NODE_ENV: development
+      # Tắt cache require của Node để sửa tệp là tiến trình tự nạp lại.
+      NODE_OPTIONS: --enable-source-maps
+
+    volumes:
+      # Mã nguồn sống từ máy host.
+      - ./server.js:/app/server.js:ro
+      - ./control-api.js:/app/control-api.js:ro
+      - ./dashboard:/app/dashboard:ro
+      - ./hermes-plugin:/app/hermes-plugin:ro
+      # node_modules của HOST không dùng được trong container Linux (có
+      # binary của macOS) → giữ một volume riêng, đã cài sẵn trong image.
+      - zalo-dev-node-modules:/app/node_modules
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - zalo-dev-hermes:/hermes
+
+    stdin_open: true
+    tty: true
+
+volumes:
+  zalo-dev-node-modules:
+  zalo-dev-hermes:

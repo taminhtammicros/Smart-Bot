@@ -55,6 +55,15 @@ function defaultBridgePort() {
   return Number(process.env.ZALO_BRIDGE_PORT) || 3873;
 }
 
+// Địa chỉ lắng nghe của bridge. Mặc định 127.0.0.1 = chỉ máy này. Docker cần
+// 0.0.0.0 khi Hermes nằm ở CONTAINER KHÁC (nối qua tên service), vì 127.0.0.1
+// bên trong container chỉ là loopback của chính nó — container khác không vào
+// được. An toàn vì verifyClient đã bắt buộc token (so sánh hằng thời gian) và
+// từ chối mọi request có header Origin (trình duyệt không nối được).
+function defaultBridgeHost() {
+  return String(process.env.ZALO_BRIDGE_HOST || '127.0.0.1').trim() || '127.0.0.1';
+}
+
 // Nhóm Zalo có thể tới hàng nghìn người; tra hồ sơ chừng này là đủ để trả lời
 // "nhóm có ai" mà không làm một lệnh đọc kéo dài.
 const GROUP_MEMBERS_LIMIT = 200;
@@ -634,8 +643,9 @@ export function startHermesBridge({
   historyListener?.on?.('closed', historyListenerDisconnectedCallback);
   if (historyListener?.ws?.readyState === 1) historyListenerReady = true;
 
+  const bindHost = defaultBridgeHost();
   wss = new WebSocketServer({
-    host: '127.0.0.1',
+    host: bindHost,
     port,
     verifyClient(info, done) {
       if (info.origin || info.req.headers.origin) return done(false, 403, 'Browser origin is not allowed');
@@ -702,7 +712,7 @@ export function startHermesBridge({
   }, Math.max(10, Number(staleCheckIntervalMs) || 15_000));
   staleTimer.unref?.();
 
-  console.log(`[bridge] 🌉 đang chờ Hermes tại ws://127.0.0.1:${port}`);
+  console.log(`[bridge] 🌉 đang chờ Hermes tại ws://${bindHost}:${port}`);
   return wss;
 }
 

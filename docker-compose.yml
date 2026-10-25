@@ -1,0 +1,96 @@
+# ============================================================================
+#  2Anh Zalo Bot — docker compose (production)
+# ============================================================================
+#  Chạy:
+#    docker compose up -d --build
+#    docker compose logs -f
+#    docker compose down
+#
+#  Image đa kiến trúc: compose tự chọn đúng biến thể cho máy đang chạy
+#  (linux/amd64 trên Intel, linux/arm64 trên Apple Silicon).
+#
+#  Build đa kiến trúc để đẩy lên registry, xem docs/PACKAGING.md.
+# ============================================================================
+
+name: 2anh-zalo-bot
+
+services:
+  bot:
+    image: 2anh/zalo-bot:2.54.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Bỏ comment để ghim kiến trúc khi cần (mặc định: kiến trúc máy đang chạy):
+      # platform: linux/amd64
+    container_name: 2anh-zalo-bot
+    restart: unless-stopped
+    init: true
+
+    ports:
+      # Dashboard quản trị — cổng người dùng mở trong trình duyệt. Chỉ mở trên
+      # loopback; quản trị viên truy cập qua SSH tunnel hoặc Caddy.
+      - "127.0.0.1:3880:3880"
+      # Cầu nối WebSocket cho plugin Hermes. Nếu Hermes chạy TRONG cùng compose
+      # network thì bỏ mapping này và nối bằng tên service (ws://bot:3873).
+      - "127.0.0.1:3873:3873"
+      # API điều khiển của sidecar. Thường KHÔNG cần publish: dashboard trong
+      # cùng container gọi qua loopback. Bỏ comment nếu muốn gọi /control từ
+      # ngoài (đã có Bearer token bảo vệ):
+      # - "127.0.0.1:3872:3872"
+
+    env_file:
+      # .env của repo — compose đọc để lấy ZALO_BRIDGE_TOKEN, ZCA_PORT…
+      - path: .env
+        required: false
+
+    environment:
+      # Ghi đè có chủ đích: trong container, Hermes nằm ở /hermes (named volume).
+      HERMES_HOME: /hermes
+      TZ: Asia/Ho_Chi_Minh
+      NODE_ENV: production
+      # Guard chống DNS-rebinding của sidecar chỉ nhận Host là loopback ĐÚNG
+      # cổng nội bộ (3872). Trình duyệt mở cổng đã publish nên gửi
+      # `127.0.0.1:3880` — phải khai ở đây, nếu không mọi request trả
+      # "Host không hợp lệ". Đổi số bên trái của `ports:` thì đổi cả dòng này.
+      ZALO_ALLOWED_HOSTS: "127.0.0.1:3880,localhost:3880"
+      # Bridge phải nghe mọi interface để Hermes ở container khác nối được.
+      # An toàn: verifyClient bắt buộc token + từ chối mọi request có Origin.
+      ZALO_BRIDGE_HOST: "0.0.0.0"
+      # Dashboard dựng link chuyển hướng từ biến này; thiếu thì nó đoán cổng
+      # 3880 — trùng số với cổng publish nhưng phải cùng giá trị mới đúng.
+      ZALO_DASHBOARD_URL: "http://127.0.0.1:3880"
+
+    volumes:
+      # Dữ liệu bền: SQLite lịch sử, session Zalo, kho tri thức.
+      # Bắt buộc là volume — nếu là bind mount trên macOS, SQLite chạy qua
+      # VirtioFS sẽ chậm và có thể hỏng WAL.
+      - zalo-data:/app/data
+      - zalo-logs:/app/logs
+      # Cấu hình Hermes (config.yaml, .env, plugin đã cài). Bỏ mount này nếu
+      # bạn chỉ dùng container như sidecar thuần và Hermes chạy ngoài Docker.
+      - hermes-home:/hermes
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const g=(u)=>fetch(u,{redirect:'manual'}).then(r=>r.status<400).catch(()=>false);Promise.all([g('http://127.0.0.1:3872/api/health'),g('http://127.0.0.1:3880/')]).then(([a,b])=>process.exit(a&&b?0:1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  zalo-data:
+  zalo-logs:
+  hermes-home:

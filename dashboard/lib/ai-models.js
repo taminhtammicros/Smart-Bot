@@ -1,13 +1,16 @@
 /**
- * Model AI theo từng chức năng (trang "Khoá API & Model", chỉ Quản trị): đọc config.yaml của Hermes (+ ov.conf của
- * OpenViking nếu bật trí nhớ tự học, + biến ảnh của xưởng) để cho thấy mỗi việc đang dùng model nào, qua đâu.
+ * Model AI theo từng chức năng (trang "Khoá API & Model", chỉ Quản trị): đọc config.yaml của Hermes (+ kho trí nhớ
+ * SQLite zalo.sqlite nếu bật trí nhớ tự học, + biến ảnh của xưởng) để cho thấy mỗi việc đang dùng model nào, qua đâu.
  * Không hiện khoá, đường dẫn lệnh hay URL đầy đủ (chỉ máy chủ:cổng). "Thử" gửi một câu ngắn tới cổng AI chính.
+ *
+ * Trí nhớ dài hạn đọc thẳng `zalo.sqlite` của sidecar — cùng tệp provider `zalo_memory` ghi (spec §21). Không đọc
+ * tệp nào ngoài sidecar (ov.conf của OpenViking đã gỡ 2026-10-22).
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { readConfigYaml } from './config-yaml.js';
 import { MODEL_NAME } from './agent-config.js';
+import { LM_PROVIDER, resolveAccount } from './learned-memory.js';
 
 const err = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const str = (v, n = 120) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -19,14 +22,42 @@ function ttsVoice(tts) {
   return str(tts?.[p]?.voice || tts?.providers?.[p]?.voice || tts?.voice || tts?.gemini?.voice || '', 60);
 }
 
-export function createAiModels({ configFile, envValue = () => null, ovConf = join(homedir(), '.openviking', 'ov.conf'), fetchImpl = fetch }) {
+export function createAiModels({ configFile, envValue = () => null, sqliteFile = null, fetchImpl = fetch }) {
   const conf = () => readConfigYaml(configFile) || {};
-  function openviking(c) {
-    if (String(c?.memory?.provider || '') !== 'zalo_memory' || !existsSync(ovConf)) return null;
+  /**
+   * Kho trí nhớ dài hạn: provider `zalo_memory` ghi vào `zalo.sqlite` (facts / profiles / soft_memories).
+   * `account_id` là UID Zalo của chính bot (xem `zalo_memory/__init__.py:41`), nên lấy từ dòng mới nhất chứ
+   * không dùng hằng số — UID đổi khi đăng nhập tài khoản khác.
+   * Đọc chỉ-đọc, mở đóng trong một lượt — kho chưa có (bot chưa chạy lần nào) hoặc bảng chưa tạo → 0.
+   */
+  function longTermMemory(c) {
+    if (String(c?.memory?.provider || '') !== LM_PROVIDER || !sqliteFile) return null;
+    let db = null;
     try {
-      const j = JSON.parse(readFileSync(ovConf, 'utf8'));
-      return { embedding: str(j?.embedding?.dense?.model, 80), vlm: str(j?.vlm?.model, 80), via: hostOf(j?.vlm?.api_base || j?.embedding?.dense?.api_base) };
-    } catch { return null; }
+      if (!existsSync(sqliteFile)) return { facts: 0, profiles: 0, soft: 0, lastAtMs: 0 };
+      db = new DatabaseSync(sqliteFile, { readOnly: true });
+      const account = resolveAccount(db);
+      if (!account) return { facts: 0, profiles: 0, soft: 0, lastAtMs: 0 };
+      const count = (sql) => {
+        try { return Number(db.prepare(sql).get(account)?.n ?? 0); } catch { return 0; }   // bảng chưa có → 0
+      };
+      const facts = count("SELECT COUNT(*) AS n FROM facts WHERE account_id = ? AND status = 'active'");
+      const profiles = count('SELECT COUNT(*) AS n FROM profiles WHERE account_id = ?');
+      const soft = count("SELECT COUNT(*) AS n FROM soft_memories WHERE account_id = ? AND status = 'active'");
+      let lastAtMs = 0;
+      try {
+        const r = db.prepare(`SELECT MAX(ts) AS last FROM (
+          SELECT MAX(updated_at_ms) AS ts FROM facts WHERE account_id = ?
+          UNION ALL SELECT MAX(updated_at_ms) FROM profiles WHERE account_id = ?
+          UNION ALL SELECT MAX(updated_at_ms) FROM soft_memories WHERE account_id = ?)`).get(account, account, account);
+        lastAtMs = Number(r?.last ?? 0) || 0;
+      } catch { /* bảng chưa có → không có mốc thời gian */ }
+      return { facts, profiles, soft, lastAtMs };
+    } catch {
+      return null;   // kho hỏng/khoá → ẩn thẻ, không làm hỏng cả trang
+    } finally {
+      try { db?.close(); } catch { /* đã đóng */ }
+    }
   }
   return {
     /** Thẻ cho từng chức năng: { id, label, model, via, note }. */
@@ -36,7 +67,7 @@ export function createAiModels({ configFile, envValue = () => null, ovConf = joi
       const tts = c.tts || {};
       const stt = c.stt || {};
       const img = c.image_gen || {};
-      const ov = openviking(c);
+      const mem = longTermMemory(c);
       const studio = hostOf(envValue('ZALO_STUDIO_IMAGE_URL'));
       const cards = [
         { id: 'main', label: 'Trò chuyện chính', model: str(m.default), via: hostOf(m.base_url) || str(m.provider), note: 'Mọi câu trả lời của bot trong nhóm và tin nhắn riêng.', testable: true, editable: true },
@@ -45,7 +76,13 @@ export function createAiModels({ configFile, envValue = () => null, ovConf = joi
         { id: 'stt', label: 'Nghe giọng nói', model: str(stt?.openai?.model || stt?.model || ''), via: stt.enabled === false ? 'đang tắt' : str(stt.provider), note: 'Chuyển tin nhắn thoại thành chữ.' },
         { id: 'image', label: 'Tạo ảnh', ...(img.provider === 'stali' ? { model: 'req/gpt-image-2', via: 'Stali API' } : { model: str(img.model), via: str(img.provider) }), note: 'Khi được nhờ vẽ/tạo ảnh.' },
         ...(studio ? [{ id: 'studio', label: 'Ảnh cho xưởng (slide, tài liệu)', model: '', via: studio, note: 'Ảnh minh hoạ trong sản phẩm của 2Anh Studio.' }] : []),
-        ...(ov ? [{ id: 'memory', label: 'Trí nhớ tự học (OpenViking)', model: ov.vlm, via: ov.via, note: `Rút trí nhớ sau trò chuyện; tìm theo ý nghĩa bằng ${ov.embedding || 'embedding'}.` }] : []),
+        ...(mem ? [{
+          id: 'memory',
+          label: 'Trí nhớ dài hạn (kho của bot)',
+          model: `${mem.facts} fact · ${mem.profiles} hồ sơ · ${mem.soft} trí nhớ mềm`,
+          via: '',
+          note: `SQLite nội bộ, không gọi model lúc truy hồi.${mem.lastAtMs ? ` Cập nhật gần nhất ${new Intl.DateTimeFormat('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(mem.lastAtMs))}.` : ''}`,
+        }] : []),
       ].filter((x) => x.id === 'main' || x.model || x.via);
       return { cards, reasoning: str(c.agent?.reasoning_effort || 'medium', 20) };
     },

@@ -1,0 +1,100 @@
+# ============================================================================
+#  .dockerignore — chỉ những gì image CẦN mới được gửi vào build context
+# ============================================================================
+#  Build context nhỏ = build nhanh và không rò rỉ dữ liệu máy dev vào image.
+#  Mọi mục dưới đây đều đã có trong .gitignore hoặc là rác của OS/IDE.
+
+# --- Thư viện: cài lại trong image theo lockfile ---------------------------
+node_modules
+**/node_modules
+.npm
+npm-debug.log*
+yarn-error.log*
+
+# --- Môi trường ảo Python ---------------------------------------------------
+.venv
+venv
+env
+**/.venv
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+
+# --- Bí mật và cấu hình cục bộ của máy dev ----------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+data/
+logs/
+*.pid
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# --- Rác macOS --------------------------------------------------------------
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Rác Windows ------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- IDE / trình soạn thảo --------------------------------------------------
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# --- Git và metadata (image không cần lịch sử) -----------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Tài liệu, ảnh chụp, kế hoạch (không ảnh hưởng lúc chạy) ----------------
+docs
+*.md
+!README.md
+CHANGELOG.md
+LICENSE
+
+# --- Kiểm thử: không nằm trong image production ----------------------------
+**/*.test.js
+scripts/run-python-tests.js
+test_*.py
+**/__pycache__
+.pytest_cache
+coverage
+.nyc_output
+
+# --- Chính các tệp Docker ---------------------------------------------------
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yml
+docker-compose*.yaml
+
+# --- Build/tạm ---------------------------------------------------------------
+dist
+build
+tmp
+.tmp
+*.log
+*.out
+*.bak
+*.bak-*
+*.before-restart.*

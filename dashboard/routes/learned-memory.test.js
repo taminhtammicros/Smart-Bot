@@ -10,6 +10,7 @@ import { loginAs, makeDeps, startApp } from '../test-helpers.js';
 
 const G = 'zalo-g-2054797107487294899';
 const O = 'zalo-u-1234567890123456789';   // kho DM của chủ nhân bot
+const ACC = '121443080539835174';          // UID Zalo của bot = account_id chung của kho
 
 /**
  * Thư viện thật + kho SQLite thật (schema do sidecar tạo). Kiểm chặn theo vai trò ở PHÍA MÁY CHỦ, không
@@ -22,13 +23,16 @@ function realLearned(t) {
   openZaloStore({ path: sqliteFile }).close();
   const conn = openBrainStore(sqliteFile);
   const now = Date.now();
+  // Tin nhắn của bot: resolver lấy `account_id` từ đây, đúng như kho thật.
+  conn.prepare('INSERT INTO messages (identity_key, account_id, thread_id, thread_type, sender_name, text, msg_type, timestamp_ms, is_self, source, created_at_ms, updated_at_ms) '
+    + "VALUES ('seed-1', ?, ?, 1, 'Ai đó', 'chào', 'chat.text', ?, 0, 'live', ?, ?)").run(ACC, G.slice(7), now, now, now);
   const fact = conn.prepare(
     'INSERT INTO facts (account_id, scope, kind, subject, content, source_msg_keys, confidence, valid_from_ms, valid_to_ms, status, origin, created_at_ms, updated_at_ms) '
-    + "VALUES ('zalo', ?, 'preference', 'xưng hô', ?, '[]', 0.9, 0, NULL, 'active', 'extract', ?, ?)");
-  fact.run(G, 'Nhóm gọi bot là Nhi', now, now);
-  fact.run(O, 'Chủ nhân thích cà phê đen', now, now);
+    + "VALUES (?, ?, 'preference', 'xưng hô', ?, '[]', 0.9, 0, NULL, 'active', 'extract', ?, ?)");
+  fact.run(ACC, G, 'Nhóm gọi bot là Nhi', now, now);
+  fact.run(ACC, O, 'Chủ nhân thích cà phê đen', now, now);
   conn.prepare('INSERT INTO soft_memories (account_id, scope, body, kind, source_msg_keys, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run('zalo', G, 'Nhóm thích trả lời ngắn', 'note', '[]', 'active', now, now);
+    .run(ACC, G, 'Nhóm thích trả lời ngắn', 'note', '[]', 'active', now, now);
   conn.close();
   const settingsFile = join(dir, 'zalo', 'brain.json');
   const learnedMemory = createLearnedMemory({

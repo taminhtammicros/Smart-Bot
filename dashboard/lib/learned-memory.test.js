@@ -11,6 +11,8 @@ import { openBrainStore } from './brain-store.js';
 const G = 'zalo-g-2054797107487294899';
 const U = 'zalo-u-5554567890123456789';   // một khách nhắn riêng
 const O = 'zalo-u-1234567890123456789';   // chủ nhân bot nhắn riêng
+const ACC = '121443080539835174';          // UID Zalo của bot = account_id chung của kho
+const OTHER_ACC = '999999999999999999';    // tài khoản Zalo khác từng đăng nhập
 
 function tmp(t) {
   const dir = mkdtempSync(join(tmpdir(), 'zd-lm-'));
@@ -25,16 +27,23 @@ function seeded(t, { owners = [O.slice('zalo-u-'.length)] } = {}) {
   openZaloStore({ path: sqliteFile }).close();   // sidecar tạo schema; test chỉ gieo dữ liệu
   const conn = openBrainStore(sqliteFile);
   const now = Date.now();
+  // `account_id` thật là UID Zalo của bot, lấy từ tin nhắn mới nhất trong kho — gieo một tin để resolver thấy.
+  conn.prepare("INSERT INTO messages (identity_key, account_id, thread_id, thread_type, sender_name, text, msg_type, timestamp_ms, is_self, source, created_at_ms, updated_at_ms) "
+    + "VALUES ('seed-1', ?, ?, 1, 'Ai đó', 'chào', 'chat.text', ?, 0, 'live', ?, ?)").run(ACC, G.slice(7), now, now, now);
   const fact = conn.prepare(
     'INSERT INTO facts (account_id, scope, kind, subject, content, source_msg_keys, confidence, valid_from_ms, valid_to_ms, status, origin, created_at_ms, updated_at_ms) '
-    + "VALUES ('zalo', ?, ?, ?, ?, '[]', ?, 0, NULL, 'active', 'extract', ?, ?)");
-  fact.run(G, 'preference', 'xưng hô', 'Nhóm gọi bot là Nhi', 0.9, now, now);
-  fact.run(U, 'decision', 'giá', 'Khách chốt 50k', 0.8, now, now);
-  fact.run(O, 'preference', 'sở thích', 'Chủ nhân thích cà phê đen', 0.95, now, now);
+    + "VALUES (?, ?, ?, ?, ?, '[]', ?, 0, NULL, 'active', 'extract', ?, ?)");
+  fact.run(ACC, G, 'preference', 'xưng hô', 'Nhóm gọi bot là Nhi', 0.9, now, now);
+  fact.run(ACC, U, 'decision', 'giá', 'Khách chốt 50k', 0.8, now, now);
+  fact.run(ACC, O, 'preference', 'sở thích', 'Chủ nhân thích cà phê đen', 0.95, now, now);
+  // Dòng của tài khoản Zalo KHÁC: không bao giờ được lọt vào danh sách/tìm kiếm/xoá.
+  fact.run(OTHER_ACC, G, 'preference', 'nhiễu', 'Dòng của tài khoản khác', 0.5, now, now);
   conn.prepare('INSERT INTO soft_memories (account_id, scope, body, kind, source_msg_keys, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run('zalo', G, 'Nhóm thích trả lời ngắn, có emoji', 'note', '[]', 'active', now, now);
+    .run(ACC, G, 'Nhóm thích trả lời ngắn, có emoji', 'note', '[]', 'active', now, now);
+  conn.prepare('INSERT INTO soft_memories (account_id, scope, body, kind, source_msg_keys, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(OTHER_ACC, G, 'Dòng mềm của tài khoản khác', 'note', '[]', 'active', now, now);
   conn.prepare('INSERT INTO profiles (account_id, scope, body, source_fact_ids, updated_at_ms) VALUES (?, ?, ?, ?, ?)')
-    .run('zalo', G, 'Nhóm cà phê, hỏi nhiều về giá.', '[]', now);
+    .run(ACC, G, 'Nhóm cà phê, hỏi nhiều về giá.', '[]', now);
   conn.close();
   return { dir, sqliteFile, now };
 }
@@ -145,8 +154,10 @@ test('xoá: fact đánh dấu deleted (giữ dòng), soft xoá hẳn, profile xo
   assert.deepEqual(await lm.as('admin').list(G), [], 'không còn mục đang dùng');
   const conn = openBrainStore(sqliteFile);
   assert.equal(conn.prepare('SELECT status FROM facts WHERE fact_id = 1').get().status, 'deleted', 'fact giữ dòng để tra lại');
-  assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM soft_memories').get().n, 0);
-  assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM profiles').get().n, 0);
+  // Dòng của tài khoản Zalo khác phải còn nguyên — chỉ dòng của bot bị xoá.
+  assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM soft_memories WHERE account_id = ?').get(ACC).n, 0);
+  assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM profiles WHERE account_id = ?').get(ACC).n, 0);
+  assert.equal(conn.prepare('SELECT COUNT(*) AS n FROM soft_memories WHERE account_id = ?').get(OTHER_ACC).n, 1);
   conn.close();
 });
 
@@ -163,14 +174,14 @@ test('quên phạm vi: xoá facts + hồ sơ + trí nhớ mềm của ĐÚNG ph�
   const { sqliteFile } = seeded(t);
   const conn = openBrainStore(sqliteFile);
   conn.prepare("INSERT INTO messages (identity_key, account_id, thread_id, thread_type, sender_name, text, msg_type, timestamp_ms, is_self, source, created_at_ms, updated_at_ms) "
-    + "VALUES ('k1', 'zalo', ?, 1, 'Ai đó', 'tin thô', 'chat.text', 1, 0, 'live', 1, 1)").run(G.slice(7));
+    + "VALUES ('k1', ?, ?, 1, 'Ai đó', 'tin thô', 'chat.text', 1, 0, 'live', 1, 1)").run(ACC, G.slice(7));
   conn.close();
   const lm = make(sqliteFile);
   await lm.as('admin').forget(G);
   assert.deepEqual(await lm.as('admin').list(G), []);
   assert.equal((await lm.as('admin').list(U)).length, 1, 'phạm vi khác giữ nguyên');
   const after = openBrainStore(sqliteFile);
-  assert.equal(after.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 1, 'lịch sử không phải tri thức');
+  assert.equal(after.prepare('SELECT COUNT(*) AS n FROM messages WHERE account_id = ?').get(ACC).n, 2, 'lịch sử không phải tri thức');
   after.close();
 });
 
@@ -196,4 +207,21 @@ test('đổi chu kỳ: chỉ số nguyên trong 30–1440, ghi đúng tệp work
   for (const bad of [10, 2000, 60.5, '60', null]) {
     assert.throws(() => lm.setSettings({ extractMinutes: bad }), (e) => e.statusCode === 400, `phải từ chối ${bad}`);
   }
+});
+
+test('account_id: lấy UID Zalo của bot từ tin nhắn mới nhất, không dùng hằng số "zalo"; dòng của tài khoản khác bị bỏ', async (t) => {
+  const { sqliteFile } = seeded(t);
+  const lm = make(sqliteFile);
+  const scopes = (await lm.as('admin').scopes()).map((s) => s.scope);
+  assert.deepEqual(scopes.sort(), [G, O, U].sort(), 'chỉ phạm vi của account_id thật');
+
+  const conn = openBrainStore(sqliteFile);
+  const counts = conn.prepare('SELECT COUNT(*) AS n FROM facts WHERE account_id = ?');
+  assert.equal(counts.get(ACC).n, 3, 'ba fact của bot');
+  assert.equal(counts.get(OTHER_ACC).n, 1, 'dòng nhiễu của tài khoản khác vẫn còn, không bị đụng');
+  conn.close();
+
+  const entries = await lm.as('admin').list(G);
+  assert.ok(!entries.some((e) => e.text === 'Dòng của tài khoản khác'), 'Danh sách không lẫn dòng tài khoản khác');
+  assert.ok(!entries.some((e) => e.text === 'Dòng mềm của tài khoản khác'), 'Trí nhớ mềm cũng không lẫn');
 });

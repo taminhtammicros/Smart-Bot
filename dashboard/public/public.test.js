@@ -506,6 +506,20 @@ test('xưởng: ô số lượt, gửi nút xưởng chỉ khi đủ khoá, đ�
   assert.equal(sameSettings({ ...base, studioQuota: undefined }, base), true, 'thiếu số lượt = theo mặc định');
 });
 
+test('so sánh cài đặt: sửa lời nhắc riêng / số lượt / nút xưởng đều phải bật nút Lưu', async () => {
+  const { sameSettings } = await import('./views/permissions.js');
+  const base = { active: true, replyOnlyTagged: true, paused: false, features: { web: true }, studio: S_OFF,
+    studioQuota: null, imageQuota: null, videoQuota: null, soulReminder: '', modelOverride: '' };
+  assert.equal(sameSettings(base, { ...base }), true, 'không sửa gì');
+  // Đúng triệu chứng đã báo: gõ vào ô "Dòng nhắc riêng của nhóm" mà nút Lưu vẫn tắt.
+  assert.equal(sameSettings({ ...base, soulReminder: 'Lớp 12A xưng em' }, base), false, 'lời nhắc riêng');
+  assert.equal(sameSettings(base, { ...base, soulReminder: 'câu cũ' }), false, 'xoá lời nhắc riêng');
+  assert.equal(sameSettings({ ...base, studioQuota: 5 }, base), false, 'số lượt xưởng');
+  assert.equal(sameSettings({ ...base, imageQuota: 5 }, base), false, 'số ảnh AI');
+  assert.equal(sameSettings({ ...base, videoQuota: 5 }, base), false, 'số video AI');
+  assert.equal(sameSettings({ ...base, studio: { ...S_OFF, studioVideo: true } }, base), false, 'nút xưởng');
+});
+
 test('lời nhắc riêng: gửi khi có câu, xoá khi chủ động xoá, im lặng khi chưa từng đặt', async () => {
   const { settingsPayload } = await import('./views/permissions.js');
   const base = { active: true, replyOnlyTagged: true, features: { web: true }, studio: S_OFF, studioQuota: null };

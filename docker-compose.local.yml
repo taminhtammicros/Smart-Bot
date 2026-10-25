@@ -1,0 +1,111 @@
+# ============================================================================
+#  2Anh Zalo Bot — override cho máy CÓ SẴN BẢN NATIVE đang chạy
+# ============================================================================
+#  Dùng khi dashboard native (node dashboard/server.js) đang giữ 3880/3872/3873
+#  và ta chỉ muốn dựng thêm một bản Docker để thử:
+#
+#    docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+#  Compose gộp các khoá theo thứ tự: tệp sau đè tệp trước. Ở đây chỉ đổi cổng
+#  và tên project để volume không lẫn với bản chạy cổng chuẩn.
+#
+#  ⚠️  HAI BẢN CÙNG ĐĂNG NHẬP MỘT TÀI KHOẢN ZALO LÀ RỦI RO THẬT: Zalo chỉ cho
+#  một phiên hoạt động, bản sau đăng nhập sẽ đẩy bản trước ra (hoặc bị đánh dấu
+#  đăng nhập bất thường). Dùng bản này để XEM GIAO DIỆN, đừng quét QR nếu bản
+#  native vẫn đang chạy tài khoản đó.
+# ============================================================================
+
+name: 2anh-zalo-bot-local
+
+services:
+  bot:
+    container_name: 2anh-zalo-bot-local
+    networks:
+      - zalo-net
+    ports: !override
+      # 3881 thay cho 3880 — bản native giữ 3880.
+      # `!override` là bắt buộc: mặc định compose GỘP danh sách ports của hai
+      # tệp, nên 3880 của tệp gốc vẫn còn và sẽ đụng bản native.
+      - "127.0.0.1:3881:3880"
+      # 3882 thay cho 3873 — bridge của container này không cho Hermes trên máy
+      # nối vào (Hermes đang nối bản native). Chỉ mở khi thật sự cần.
+      - "127.0.0.1:3882:3873"
+
+    environment:
+      # Guard chống DNS-rebinding phải khớp cổng đã publish ở trên.
+      ZALO_ALLOWED_HOSTS: "127.0.0.1:3881,localhost:3881"
+      # Địa chỉ người dùng mở. Thiếu biến này thì dashboard tự dựng URL từ
+      # ZALO_DASHBOARD_PORT mặc định (3880) — trùng cổng bản native, và link
+      # chuyển hướng sau khi đăng nhập sẽ nhảy sang bản native.
+      ZALO_DASHBOARD_URL: "http://127.0.0.1:3881"
+
+    volumes: !override
+      # Volume riêng: dữ liệu Docker tách hẳn khỏi LOCAL-REPO/data của bản native.
+      - zalo-local-data:/app/data
+      - zalo-local-logs:/app/logs
+      - hermes-home:/hermes
+
+  # ==========================================================================
+  #  Hermes Agent — image chính thức, dùng CHUNG ~/.hermes với bản native
+  # ==========================================================================
+  #  ⚠️  RỦI RO ĐÃ ĐƯỢC CHẤP NHẬN: image là v0.22.5, bản native là v0.21.3.
+  #  Hai phiên bản cùng ghi config.yaml + state.db. Nếu v0.22.5 nâng schema
+  #  state.db thì bản native có thể không đọc lại được.
+  #  Sao lưu trước khi bật: ~/.hermes/backups/pre-docker-<stamp>/
+  #  Tắt ngay bằng: docker compose ... stop hermes
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-docker
+    restart: unless-stopped
+    # ⚠️  KHÔNG dùng network_mode: host trên macOS — Docker Desktop chạy trong
+    # một VM Linux, `host` nghĩa là host của VM đó, KHÔNG phải 127.0.0.1 của máy
+    # Mac. Đã thử: container báo "cannot reach the zca-js sidecar at
+    # ws://127.0.0.1:3882". Thay vào đó dùng chung network với container bot
+    # và gọi bằng TÊN SERVICE (bot), Docker tự phân giải DNS nội bộ.
+    networks:
+      - zalo-net
+    volumes:
+      # ======================================================================
+      #  VÌ SAO KHÔNG mount thẳng ~/.hermes:/opt/data
+      # ======================================================================
+      #  Hermes tạo Unix domain socket tại $HERMES_HOME/gateway.sock để các
+      #  tiến trình con biết gateway còn sống. Trên macOS, bind mount đi qua
+      #  VirtioFS — hệ tệp này KHÔNG hỗ trợ Unix socket: bind() trả ENOTSUP(95)
+      #  và gateway chết ngay:
+      #      RuntimeError: gateway session bootstrap control listener unavailable
+      #  Đã thử và hỏng đúng như vậy. Không có biến môi trường nào đổi được
+      #  đường dẫn socket (xem gateway/control_socket.py — hard-code
+      #  `$HERMES_HOME/gateway.sock`).
+      #
+      #  Nên: /opt/data là NAMED VOLUME (hệ tệp Linux thật, socket chạy được),
+      #  và từng tệp cấu hình cần dùng chung được bind riêng vào trong.
+      # ======================================================================
+      - hermes-docker-home:/opt/data
+
+      # --- Cấu hình --------------------------------------------------------
+      # KHÔNG bind config.yaml: bản Docker cần bridge_url riêng (ws://bot:3873)
+      # và không được ghi vào config của bản native. config.yaml nằm trong
+      # volume riêng (hermes-docker-home); tạo lần đầu bằng lệnh trong README.
+      # Chỉ chia sẻ .env (chứa token/khoá) và plugins (cùng một bộ plugin).
+      - ${HOME}/.hermes/.env:/opt/data/.env:ro
+      # Plugin Zalo: thư mục plugin chứa zalo, zalo_tools, zalo_memory.
+      - ${HOME}/.hermes/plugins:/opt/data/plugins
+      # SOUL.md + nhân cách.
+      - ${HOME}/.hermes/SOUL.md:/opt/data/SOUL.md:ro
+    environment:
+      - HERMES_UID=${HERMES_UID:-502}
+      - HERMES_GID=${HERMES_GID:-20}
+      # Gọi sidecar qua tên service trong cùng network — không qua loopback.
+      - ZALO_BRIDGE_URL=ws://bot:3873
+    # `gateway run` = tiến trình nền kết nối các platform (Zalo, Telegram…).
+    command: ["gateway", "run"]
+
+networks:
+  zalo-net:
+    driver: bridge
+
+volumes:
+  zalo-local-data:
+  zalo-local-logs:
+  hermes-docker-home:
+

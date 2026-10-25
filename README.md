@@ -319,13 +319,46 @@ display:
 
 ## Yêu cầu
 
-* **Node.js 22+**
+* **Node.js 22.5+** (cần `node:sqlite`)
 * **Một tài khoản Zalo phụ** — xem phần Rủi ro bên dưới
 * **Hermes Agent đã cài đặt** — sidecar không có bộ não dự phòng độc lập
 
 ---
 
 ## Cài đặt
+
+> **Người dùng cuối:** xem [`README-INSTALL.md`](README-INSTALL.md) — hướng dẫn
+> 1-click cho macOS (Intel + Apple Silicon), Linux, Windows và Docker.
+
+### Cách nhanh (mọi nền tảng)
+
+```bash
+git clone https://github.com/luonghaianh1208/2anh-zalo-bot.git
+cd 2anh-zalo-bot
+
+./scripts/setup.sh          # macOS / Linux
+scripts\setup.bat           # Windows
+```
+
+Script tự kiểm tra Node, cài `npm ci`, tạo `.env` + sinh token, cài plugin vào
+Hermes và chạy `doctor`. Sau đó chạy bot:
+
+```bash
+./scripts/run.sh            # macOS / Linux
+scripts\run.bat             # Windows
+```
+
+### Docker
+
+```bash
+cp .env.example .env        # rồi đặt ZALO_BRIDGE_TOKEN
+docker compose up -d
+```
+
+Image đa kiến trúc (`linux/amd64` + `linux/arm64`). Cách build từ máy macOS
+Intel: [`docs/PACKAGING.md`](docs/PACKAGING.md) mục 3.
+
+### Cách thủ công
 
 Nếu giao việc cho một coding agent, chỉ cần gửi yêu cầu: **“Clone repo này và cài vào Hermes Agent theo `AGENTS.md`; chạy `doctor` và báo lại kết quả.”** Agent không cần biết trước cấu trúc nội bộ của plugin.
 

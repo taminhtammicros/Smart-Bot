@@ -138,7 +138,7 @@ export function buildDeps({ env = process.env, sidecarRoot = join(here, '..'), i
     insightAi: createInsightAi({ dir: paths.insightDir }),
     agentConfig: createAgentConfig({ configFile: paths.hermesConfigFile, envValue: (k) => readEnvKey(paths.hermesEnvFile, k) }),
     aiKeys: createAiKeys({ envFile: paths.hermesEnvFile, configFile: paths.hermesConfigFile, poolFile: join(paths.hermesHome, 'zalo', 'key-pool.json') }),
-    aiModels: createAiModels({ configFile: paths.hermesConfigFile, envValue: (k) => readEnvKey(paths.hermesEnvFile, k) }),
+    aiModels: createAiModels({ configFile: paths.hermesConfigFile, envValue: (k) => readEnvKey(paths.hermesEnvFile, k), sqliteFile: paths.sqliteFile }),
     mediaEngines: createMediaEngines({ hermesHome: paths.hermesHome, configFile: paths.hermesConfigFile, envFile: paths.hermesEnvFile }),
     soulPresetsFile: join(paths.hermesHome, 'zalo', 'soul-presets.json'),
     soul: createSoul({ hermesHome: paths.hermesHome, historyDir: paths.soulHistoryDir }),
@@ -198,7 +198,10 @@ async function main() {
   // Chủ nhân đọc từ tệp .env, không từ môi trường: tiến trình con khởi động lại sẽ thừa hưởng bản cũ và không bao giờ áp dụng danh sách mới.
   delete process.env.ZALO_ALLOWED_USERS;
   const app = createDashboardApp(deps);
-  app.listen(deps.config.port, '127.0.0.1', () => console.log(`[dashboard] đang chạy tại ${deps.config.publicUrl} (127.0.0.1:${deps.config.port})`));
+  // `ZALO_DASHBOARD_HOST`: mặc định 127.0.0.1. Docker cần 0.0.0.0 để nhận
+  // được từ ngoài container; compose chỉ publish ra loopback của máy chủ.
+  const host = String(process.env.ZALO_DASHBOARD_HOST || '127.0.0.1').trim() || '127.0.0.1';
+  app.listen(deps.config.port, host, () => console.log(`[dashboard] đang chạy tại ${deps.config.publicUrl} (${host}:${deps.config.port})`));
   const tick = singleFlight(async () => { try { await deps.watchdog.tick(); } catch (e) { console.warn('[watchdog]', e.message); } });
   setInterval(tick, 30_000); tick();
   // Đo máy chủ mỗi phút; lần đầu sau 5 giây để CPU có một khoảng đo thật.

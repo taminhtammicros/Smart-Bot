@@ -52,8 +52,22 @@ const server = createServer(app);
 // Chặn DNS rebinding: trang web lạ trỏ tên miền của nó về 127.0.0.1 thì trình
 // duyệt coi là cùng origin, tự đặt được mọi header — chỉ Host còn lộ ra tên
 // miền thật. Không chặn thì trang đó đăng xuất được bot và lấy được ảnh QR.
+//
+// `ZALO_ALLOWED_HOSTS`: danh sách host:port bổ sung (phẩy ngăn cách). Cần khi
+// cổng được ánh xạ/đặt sau proxy nên Host không còn là `<loopback>:<PORT>` —
+// ví dụ Docker publish `-p 3897:3872` thì Host là `127.0.0.1:3897`. Không đặt
+// thì giữ nguyên hành vi cũ (chỉ loopback đúng cổng nội bộ).
+// KHÔNG đưa tên miền công khai vào đây nếu chưa có proxy xác thực trước.
+const EXTRA_HOSTS = new Set(
+  String(process.env.ZALO_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
+);
+
 function isLocalHost(host) {
-  return [`127.0.0.1:${PORT}`, `localhost:${PORT}`].includes(String(host || '').toLowerCase());
+  const value = String(host || '').toLowerCase();
+  return [`127.0.0.1:${PORT}`, `localhost:${PORT}`].includes(value) || EXTRA_HOSTS.has(value);
 }
 
 const wss = new WebSocketServer({
@@ -299,6 +313,11 @@ async function logoutZalo() {
 }
 
 const PORT = Number(process.env.ZCA_PORT) || 3872;
+// Địa chỉ lắng nghe. Mặc định 127.0.0.1 — cổng này điều khiển được Zalo (gửi
+// tin dưới tên chủ tài khoản), nên KHÔNG mở ra mạng LAN trừ khi có rào chắn
+// riêng. Trong Docker, container phải nghe 0.0.0.0 mới nhận được từ ngoài;
+// compose chỉ publish ra loopback của máy chủ nên vẫn không lộ ra LAN.
+const HOST = String(process.env.ZCA_HOST || '127.0.0.1').trim() || '127.0.0.1';
 
 // Ghi PID ra file để Hermes-Offline.vbs tắt đúng tiến trình này. Không thể
 // nhận diện qua dòng lệnh vì nó chỉ là "node server.js" — trùng với vô số
@@ -330,7 +349,7 @@ process.on('exit', removePidFile);
 
 server.on('error', (error) => {
   runtimeHealth.recordError('dashboard_server_error', error?.code || 'listen_failed');
-  console.error(`[boot] không mở được dashboard 127.0.0.1:${PORT}: ${error?.code || 'listen_failed'}`);
+  console.error(`[boot] không mở được dashboard ${HOST}:${PORT}: ${error?.code || 'listen_failed'}`);
   stopBotListener();
   stopHermesBridge();
   removePidFile();
@@ -339,7 +358,7 @@ server.on('error', (error) => {
   process.exitCode = 1;
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, HOST, () => {
   writePidFile();
-  console.log(`ZCA UI running at http://127.0.0.1:${PORT}`);
+  console.log(`ZCA UI running at http://${HOST}:${PORT}`);
 });

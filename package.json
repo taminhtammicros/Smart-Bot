@@ -15,11 +15,22 @@
     "setup": "node scripts/setup.js",
     "install:hermes": "node scripts/install-hermes.js",
     "doctor": "node scripts/doctor.js",
-    "uninstall:hermes": "node scripts/uninstall-hermes.js"
+    "uninstall:hermes": "node scripts/uninstall-hermes.js",
+    "native:setup": "node scripts/native/check-runtime.js && node scripts/setup.js",
+    "native:run": "node server.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.5 <27"
   },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "keywords": [
     "zalo",
     "hermes-agent",

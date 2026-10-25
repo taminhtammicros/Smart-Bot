@@ -4,6 +4,90 @@ Theo chuẩn [Keep a Changelog](https://keepachangelog.com/vi/1.1.0/).
 
 ## [Chưa phát hành]
 
+### Mới — Bộ đóng gói: Docker đa kiến trúc + script cài native ba hệ điều hành
+
+- **`Dockerfile`** đa stage (Debian slim, không Alpine vì wheel `pymupdf`/`lxml`/`pillow-jxl`
+  chỉ có bản glibc), image 1.09 GB, chạy `tini` làm PID 1, user không phải root (uid 10001),
+  healthcheck bằng chính `/api/health`. Build cho cả `linux/amd64` và `linux/arm64`.
+- **`docker-compose.yml`** với ba named volume (`data`/`logs`/`hermes`), chỉ publish ra loopback,
+  `no-new-privileges`, log rotation. Kèm `docker-compose.dev.yml` mount mã nguồn để sửa là thấy ngay.
+- **`.dockerignore`** loại `node_modules`, `.venv`, `data/`, `logs/`, `.env*`, rác macOS/Windows,
+  tài liệu và mọi `*.test.js`.
+- **`scripts/setup.sh` + `run.sh`** (macOS Intel/Apple Silicon, Linux x86_64/arm64) và
+  **`setup.bat`/`setup.ps1` + `run.bat`/`run.ps1`** (Windows 10/11): tự kiểm runtime, `npm ci`,
+  tạo `.env` + sinh `ZALO_BRIDGE_TOKEN`, cài plugin vào Hermes, chạy `doctor`. `run.sh` có
+  `--background/--stop/--status/--port/--dashboard`.
+- **`scripts/native/check-runtime.js`** — một chỗ kiểm máy đích cho cả ba HĐH (Node ≥ 22.5,
+  `node:sqlite`, kiến trúc CPU, RAM, lockfile), có `--json` cho CI.
+- **`requirements.txt`** — thư viện Python của plugin, dùng khoảng phiên bản (không ghim) để
+  `pip` chọn wheel khớp OS + kiến trúc. **`scripts/verify-requirements.sh`** chứng minh từng
+  gói có wheel cho `linux/amd64` và `linux/arm64` bằng `pip download --only-binary=:all:`.
+- **`README-INSTALL.md`** cho người dùng cuối (1-click từng HĐH + Docker), **`docs/PACKAGING.md`**
+  cho người phát hành (buildx, kiểm chứng, các cái bẫy đã gặp).
+
+**Sửa kèm để Docker dùng được:**
+
+- `server.js` thêm `ZCA_HOST` (mặc định `127.0.0.1`, container đặt `0.0.0.0`); mặc định không đổi
+  nên bản chạy native vẫn chỉ nghe loopback.
+- `server.js` thêm `ZALO_ALLOWED_HOSTS`: guard chống DNS-rebinding chỉ nhận Host là loopback đúng
+  cổng nội bộ, nên cổng đã publish (`-p 3897:3872`) bị trả *"Host không hợp lệ"*. Danh sách này
+  mở thêm đúng host:port cần thiết, mặc định rỗng = giữ nguyên hành vi cũ.
+- `dashboard/server.js` thêm `ZALO_DASHBOARD_HOST` cùng lý do.
+- `package.json` thêm `os`/`cpu` và siết `engines` thành `>=22.5 <27` (cần `node:sqlite`).
+
+- **`scripts/docker-entrypoint.sh`** — image chạy **cả hai** tiến trình như bản native
+  (`server.js` sidecar + `dashboard/server.js`). Bản đầu chỉ chạy sidecar nên container
+  `healthy` mà mở cổng publish chỉ nhận `302 → 127.0.0.1:3880` trỏ vào hư không.
+  Healthcheck kiểm cả hai; một tiến trình chết thì dừng cả container.
+  Tắt từng phần: `ZALO_RUN_SIDECAR=0` / `ZALO_RUN_DASHBOARD=0`.
+- **`docker-compose.local.yml`** — chạy song song với bản native đang giữ 3880:
+  Docker sang 3881, volume riêng (`ports: !override` vì compose mặc định **gộp**
+  danh sách, không thay thế).
+
+**Đo:** `docker buildx build --platform linux/amd64` → 1.09 GB; container `Up (healthy)`,
+`curl /api/health` từ host trả JSON, `python3 -V` = 3.12.15, `import websockets,docx,pptx,openpyxl,
+fpdf,pymupdf,pdf2docx,lxml.etree,requests,httpx,yaml,psutil,PIL` → OK, `id` = uid 10001, SQLite ghi
+được vào volume. `docker compose up -d` → healthy. `bash -n` cả ba script shell; `scripts/native`
+3/3; `dashboard/lib` + `dashboard/routes` 641/646 (4 fail có sẵn trên cây sạch: `env-file` 1,
+`kb-store` 3; `hermes-bridge` heartbeat flaky khi chạy song song, pass khi chạy riêng).
+
+### Sửa — Trang Trí nhớ trống trơn: lọc `account_id` bằng hằng số `'zalo'` thay vì UID Zalo của bot
+
+- Triệu chứng: mở **Trí nhớ** trên dashboard thấy không có nhóm/người nào, dù kho đang có hàng trăm fact. Nguyên
+  nhân: `dashboard/lib/learned-memory.js` dùng `LM_ACCOUNT = 'zalo'` cho mọi câu truy vấn, trong khi provider
+  `zalo_memory` ghi `account_id` = **UID Zalo của chính bot** (`hermes-plugin/zalo_memory/__init__.py:41`): kho thật
+  đang là `121443080539835174`. Không dòng nào khớp → danh sách, tìm kiếm, sửa, xoá, "quên phạm vi" đều rỗng.
+- Nay có `resolveAccount(conn)`: đọc `account_id` từ tin nhắn mới nhất (lùi về `facts`, rồi `profiles` khi kho chưa
+  có tin). Mỗi lượt đọc lấy lại — **không** đệm trong module, vì dashboard mở nhiều kho (nhiều máy, test) và một
+  cache dùng chung sẽ trả UID của kho này cho kho khác.
+- Kho chưa có tin nào → `''`: `scopes()`/`list()`/`search()` trả rỗng như trước; `edit()`/`remove()` trả 404 kèm câu
+  dễ hiểu thay vì sửa/xoá nhầm dòng.
+- Thẻ **"Trí nhớ dài hạn (kho của bot)"** ở Khoá API & Model dùng chung hàm này (bỏ bản sao logic trong
+  `ai-models.js`).
+
+**Đo:** `dashboard/lib/learned-memory.test.js` 14/14, `dashboard/routes/learned-memory.test.js` 3/3,
+`dashboard/routes/ai-config.test.js` 4/4; toàn `dashboard/lib` + `dashboard/routes` 599/604 (`env-file` 1 + `kb-store`
+3 fail — có sẵn trên cây sạch, không liên quan). Test gieo thêm **dòng của một tài khoản Zalo khác** để chắc chắn
+danh sách/tìm kiếm/xoá không chạm vào nó. Smoke dashboard thật trên `data/zalo.sqlite`: `/api/learned-memory/scopes`
+→ 8 phạm vi kèm tên (trước khi sửa: 0).
+
+### Sửa — Thẻ "Trí nhớ tự học (OpenViking)" trong Khoá API & Model đọc tệp ngoài sidecar
+
+- Triệu chứng: `dashboard/lib/ai-models.js` đọc `~/.openviking/ov.conf` (nhà người dùng, ngoài repo) để dựng thẻ
+  trí nhớ. OpenViking đã gỡ khỏi sản phẩm từ 2.54.0, nên đây là mã chết: tệp không tồn tại → thẻ luôn bị ẩn; nếu máy
+  nào còn tệp thì dashboard hiện số liệu của một kho mà bot **không** dùng.
+- Nay thẻ **"Trí nhớ dài hạn (kho của bot)"** đếm thẳng từ `data/zalo.sqlite` của sidecar — cùng tệp provider
+  `zalo_memory` ghi: số fact đang hiệu lực, số hồ sơ, số trí nhớ mềm, và mốc cập nhật gần nhất. `account_id` lấy từ
+  dòng mới nhất trong kho (UID Zalo của bot, `zalo_memory/__init__.py:41`) chứ không dùng hằng số — đăng nhập tài
+  khoản khác là UID đổi. Không đọc tệp nào ngoài sidecar.
+- Đọc chỉ-đọc (`readOnly`), mở đóng trong một lượt; kho vắng, bảng chưa có (kho bản cũ) hay kho đang khoá đều trả 0
+  hoặc ẩn thẻ thay vì làm hỏng cả trang. Provider khác `zalo_memory` → không có thẻ, như cũ.
+
+**Đo:** `dashboard/routes/ai-config.test.js` 4/4 (thêm: provider tắt → không thẻ; kho vắng → 0; có dữ liệu → đếm
+đúng dòng `active` của đúng UID, bỏ dòng `deleted` và UID khác; mốc thời gian lấy từ dòng mới nhất; trang không còn
+chuỗi `.openviking`). Smoke dashboard thật trên `data/zalo.sqlite`: `memory` → `437 fact · 8 hồ sơ · 0 trí nhớ mềm`,
+khớp `SELECT COUNT(*)` chạy tay. (`dashboard/lib/kb-store.test.js` còn 3 fail — có sẵn trên cây sạch, không liên quan.)
+
 ### Sửa — bot không tìm thấy tài liệu vừa tải lên dashboard khi hỏi bằng tiếng Việt có dấu
 
 - Triệu chứng: tải `TOÁN 7-BỘ 10 ĐỀ ÔN TẬP GIỮA KÌ 1-26-27-CÓ ĐA.docx` lên Kho tri thức rồi hỏi *"em có tri thức

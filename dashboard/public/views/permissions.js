@@ -68,9 +68,12 @@ export function mergeGroups(groups, perms) {
   return out;
 }
 
+/** Hai bộ cài đặt trùng nhau ở MỌI trường người dùng sửa được — dùng để bật/tắt nút Lưu. */
 export function sameSettings(a, b) {
   return a.active === b.active && a.replyOnlyTagged === b.replyOnlyTagged && Boolean(a.paused) === Boolean(b.paused)
     && sameBools(a.features, b.features) && (a.modelOverride || '') === (b.modelOverride || '')
+    && (a.soulReminder || '') === (b.soulReminder || '') && sameQuotas(a, b)
+    && Object.keys({ ...a.studio, ...b.studio }).every((k) => a.studio?.[k] === b.studio?.[k]);
 }
 
 /** Số thay đổi của một nhóm/mặc định: Hoạt động, Chỉ trả lời khi được tag, tính năng, nút xưởng, số lượt, lời nhắc riêng, model riêng. */
